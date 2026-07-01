@@ -1,0 +1,33 @@
+# Normalize line endings to LF in the repo (silences CRLF/LF warnings on Windows).
+* text=auto eol=lf
+
+# Explicit text types
+*.ts    text
+*.mts   text
+*.cts   text
+*.mjs   text
+*.js    text
+*.json  text
+*.jsonc text
+*.md    text
+*.rs    text
+*.toml  text
+*.yml   text
+*.yaml  text
+
+# Binary files (never diff / normalize)
+*.node  binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.wasm  binary
+
+# GitHub linguist: keep the language bar accurate on the repo page
+dist/**            linguist-generated
+coverage/**        linguist-generated
+package-lock.json  linguist-generated
+Cargo.lock         linguist-generated
+*.snap             linguist-generated
+__tests__/**       linguist-language=TypeScript

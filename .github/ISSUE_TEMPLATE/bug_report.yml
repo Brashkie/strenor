@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a problem with Strenor
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Smallest code snippet that triggers the issue.
+      render: javascript
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Strenor version
+      placeholder: 0.0.1-alpha.0
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Node version / OS / arch
+      placeholder: Node 20 / Windows 11 / x64
+    validations:
+      required: true
