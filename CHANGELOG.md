@@ -6,6 +6,12 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Multi-platform native distribution via @napi-rs/cli (`napi` config, per-platform
+  optionalDependencies, self-contained musl-aware loader).
+- Dual ESM + CommonJS build via tsup, with bundled loader (no ESM-only runtime dep).
+
 ## [0.0.1-alpha.0]
 
 ### Added

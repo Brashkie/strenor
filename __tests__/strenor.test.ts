@@ -2,7 +2,7 @@ import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Import the compiled CJS output so the native loader (require/__dirname) works.
-// The native `.node` must be built first (CI builds it; locally use Vekziun).
+// The native `.node` must be built first (`npm run build:native`).
 import { type Codec, Strenor, TAG, jsonCodec } from '../src/index.js';
 
 const SNAP = './test.snapshot.tmp';
@@ -159,6 +159,44 @@ describe('Strenor', () => {
     it('rejects custom codec tags outside 0x20..0xFE', () => {
       const bad: Codec = { tag: 0x05, encode: () => Buffer.alloc(0), decode: () => null };
       expect(() => db.registerCodec(bad)).toThrow(RangeError);
+    });
+
+    it('throws when reading a value whose tag has no codec', () => {
+      // Write with a per-write codec (tag 0x30) that is never registered for reads.
+      const ghost: Codec = {
+        tag: 0x30,
+        encode: (v) => Buffer.from(String(v), 'utf8'),
+        decode: (b) => b.toString('utf8'),
+      };
+      db.set('ghost', 'x', { codec: ghost });
+      expect(() => db.get('ghost')).toThrow(/unknown value tag/);
+    });
+  });
+
+  describe('typed round-trips', () => {
+    it('setString / getString round-trip and null for missing', () => {
+      db.setString('s', 'hola');
+      expect(db.getString('s')).toBe('hola');
+      expect(db.getString('missing')).toBeNull();
+    });
+
+    it('setBuffer / getBuffer return null for missing', () => {
+      expect(db.getBuffer('missing')).toBeNull();
+    });
+
+    it('setJSON / getJSON round-trip via the object codec', () => {
+      db.setJSON('j', { a: 1, b: [2, 3] });
+      expect(db.getJSON<{ a: number; b: number[] }>('j')).toEqual({ a: 1, b: [2, 3] });
+      expect(db.getJSON('missing')).toBeNull();
+    });
+
+    it('typed setters accept a TTL option', () => {
+      db.setString('s-ttl', 'v', { ttl: 5000 });
+      db.setBuffer('b-ttl', Buffer.from([1]), { ttl: 5000 });
+      db.setJSON('j-ttl', { ok: true }, { ttl: 5000 });
+      expect(db.ttl('s-ttl')).toBeGreaterThan(0);
+      expect(db.ttl('b-ttl')).toBeGreaterThan(0);
+      expect(db.ttl('j-ttl')).toBeGreaterThan(0);
     });
   });
 

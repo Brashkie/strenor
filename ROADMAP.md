@@ -1,0 +1,115 @@
+# Strenor Roadmap
+
+Strenor's positioning is deliberate: **the best embedded key-value store for
+Node.js**. Not another Redis, not another SQLite — a different space.
+
+**Philosophy:** embedded-first · native-first · zero configuration · single process.
+
+Strenor competes with embedded KV engines (LMDB, RocksDB, LevelDB, sled,
+`better-sqlite3` used as a KV store). It overlaps *partially* with SQLite and
+Redis for simple key-value needs, and does **not** compete with analytical or
+server databases (DuckDB, PostgreSQL, MySQL, MongoDB) — those solve different
+problems.
+
+This roadmap follows a "ship what works, then grow" rule. Statuses are kept
+honest: **shipped**, **planned**, or **exploratory**.
+
+---
+
+## Phase 0 — Foundation (0.x)
+
+### v0.0.x — Alpha core · **shipped**
+
+- KV store with `Buffer` / `String` / `Object` values
+- Tagged binary value format `[tag][payload]`
+- Custom, pluggable codecs
+- Snapshot persistence (`dump` / `load`)
+- TTL with lazy expiration + background sweeper
+- Native Rust addon, multi-platform (Windows, macOS, Linux glibc & musl, x64/arm64)
+- Node 18+, dual ESM + CJS, 100% test coverage
+
+### v0.1.x — Bot primitives · **planned**
+
+The data structures bots actually reach for, beyond plain KV.
+
+- `list`, `queue`, `stack`, `deque`
+- Atomic counters
+- TTL improvements
+
+```ts
+db.push(key, value);      db.pop(key);
+db.enqueue(key, value);   db.dequeue(key);
+db.incr(key);             db.decr(key);
+```
+
+### v0.2.x — Persistence · **planned**
+
+Turning Strenor from "memory with a dump" into a durable store.
+
+- Append-only log (AOF)
+- Crash recovery
+- Compaction
+- Snapshot versioning
+- Checksums + corruption detection
+
+### v0.3.x — Data structures · **planned**
+
+Grow the type set — the useful subset of Redis, not all of it.
+
+- `hash`, `set`, `sorted set`
+- `bitset`, optional bloom filter
+- Built-in MsgPack and CBOR codecs
+
+### v0.4.x — Transactions · **planned**
+
+Something many embedded stores don't get right.
+
+- `batch()`, `transaction()`, `rollback()`
+- Compare-and-swap, optimistic locking
+
+### v0.5.x — Performance · **exploratory**
+
+- SIMD, arena allocator, memory pools
+- Zero-copy reads, cache optimizations
+- Public benchmarks vs LMDB, LevelDB, RocksDB, SQLite-as-KV
+
+---
+
+## Fase 1+ — Beyond the core
+
+Larger directions, pursued only when the core is solid and a real need exists.
+Full detail lives in [ECOSYSTEM.md](./ECOSYSTEM.md).
+
+| Phase | Theme | Highlights | Status |
+|---|---|---|---|
+| **Ecosystem** | Tooling packages | `@strenor/cli`, `@strenor/bench`, `@strenor/inspector`, `@strenor/backup` | planned |
+| **Storage engine** | On-disk features | compression (LZ4/Zstd), encryption, page cache, incremental snapshots, hot backup | exploratory |
+| **Plugins** | Extensibility | custom codecs, hooks, events, storage drivers | exploratory |
+| **Optional server** | Only when needed | TCP / Unix socket / HTTP / WebSocket / Pub/Sub — always opt-in | exploratory |
+| **Enterprise** | After all of the above | replication, cluster, metrics, tracing, backup scheduler, access control | exploratory |
+
+The server is a **late, optional** layer — `new Strenor()` stays embedded by
+default; `strenor serve` would be the opt-in. Never the other way around.
+
+---
+
+## The v1.0 goal
+
+A `1.0` is not "more features" — it's **trust**:
+
+- Stable API (no breaking changes)
+- Stable snapshot format
+- Excellent documentation
+- Public benchmarks against other embedded stores
+- Full support for Windows, Linux, macOS, and Android (Termux), on x64 and arm64
+
+A solid 1.0 earns more confidence than piling on features before the base is
+stable.
+
+---
+
+## Non-goals
+
+Strenor will not try to become SQLite, PostgreSQL, DuckDB, or a Redis cluster.
+Each of those solves a different problem. Strenor stays the fast, embedded,
+single-process KV store.

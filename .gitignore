@@ -8,9 +8,14 @@ dist/
 
 target/
 
-# native addon binaries (built per-platform by Vekziun)
+# native addon binaries (built per-platform by @napi-rs/cli)
 *.node
 
 # logs / misc
 *.log
 .DS_Store
+# napi-rs generated / staging
+index.js
+index.d.ts
+npm/
+artifacts/

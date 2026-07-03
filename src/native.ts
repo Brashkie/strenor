@@ -24,48 +24,63 @@ export interface NativeBinding {
   Strenor: new () => NativeStrenorInstance;
 }
 
-// Works in both CJS and ESM output: createRequire + import.meta.url give a real
-// require and a stable directory regardless of module format.
+// Self-contained loader using the @napi-rs/cli naming convention, so binaries
+// produced by `napi build --platform` and packages published as
+// optionalDependencies both resolve. Works in CJS and ESM output.
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 
-// Single point that resolves the platform-specific `.node` binary.
-// Strenor is built/published multiplatform via Vekziun (@vekziun/napi); this is
-// where you wire whatever it emits. Candidates cover both the bundle dir and the
-// package root.
-const names = [
-  'strenor.node',
-  `strenor.${process.platform}-${process.arch}.node`,
-  `strenor.${process.platform}-${process.arch}-gnu.node`,
-  `strenor.${process.platform}-${process.arch}-msvc.node`,
-];
-
-const dirs = [here, join(here, '..')];
-
-let native: NativeBinding | null = null;
-let lastErr: unknown = null;
-
-for (const dir of dirs) {
-  for (const name of names) {
-    const abs = join(dir, name);
-    if (!existsSync(abs)) continue;
-    try {
-      native = require(abs) as NativeBinding;
-      break;
-    } catch (err) {
-      lastErr = err;
-    }
+/**
+ * musl vs glibc detection — where most native addons silently break on
+ * Alpine/Docker. glibc exposes glibcVersionRuntime in process.report; musl does not.
+ */
+function isMusl(): boolean {
+  try {
+    const report = process.report?.getReport?.() as
+      | { header?: { glibcVersionRuntime?: string } }
+      | undefined;
+    return !report?.header?.glibcVersionRuntime;
+  } catch {
+    return false; // no process.report -> assume glibc (the common case)
   }
-  if (native) break;
 }
 
-if (!native) {
-  const detail = lastErr instanceof Error ? `\nLast error: ${lastErr.message}` : '';
-  throw new Error(
-    `strenor: could not load native addon. Build it first (e.g. with Vekziun) and make sure the .node binary sits next to the compiled output.${detail}`
-  );
+/** Platform suffix matching @napi-rs/cli (e.g. "linux-x64-gnu", "win32-arm64-msvc"). */
+function currentSuffix(): string {
+  const { platform, arch } = process;
+  switch (platform) {
+    case 'win32':
+      return `win32-${arch}-msvc`;
+    case 'darwin':
+      return `darwin-${arch}`;
+    case 'linux':
+      return `linux-${arch}-${isMusl() ? 'musl' : 'gnu'}`;
+    case 'android':
+      return arch === 'arm' ? 'android-arm-eabi' : `android-${arch}`;
+    default:
+      throw new Error(`strenor: unsupported platform ${platform}-${arch}`);
+  }
 }
 
-const binding: NativeBinding = native;
+function load(): NativeBinding {
+  const suffix = currentSuffix();
+  // 1) local binary first (after `napi build --platform`) — dev/test without publishing.
+  const local = join(here, '..', `strenor.${suffix}.node`);
+  if (existsSync(local)) {
+    return require(local) as NativeBinding;
+  }
+  // 2) platform package from optionalDependencies.
+  const pkg = `strenor-${suffix}`;
+  try {
+    return require(pkg) as NativeBinding;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'MODULE_NOT_FOUND') throw err;
+    throw new Error(
+      `strenor: no native binary for "${suffix}".\n  - looked for local: ${local}\n  - looked for package: ${pkg}\nIs this platform unsupported, or did the optional dependency fail to install?`
+    );
+  }
+}
+
+const binding = load();
 
 export default binding;

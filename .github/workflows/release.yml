@@ -1,46 +1,98 @@
 name: Release
 
+# Multi-platform native publish with @napi-rs/cli. Each matrix job builds the
+# .node it can produce; the publish job collects them, packs per-platform
+# packages, and publishes (platform packages first, then the main package).
 on:
   push:
     tags:
       - 'v*'
 
 jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          # Native hosts (no cross toolchain needed)
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: macos-13
+            target: x86_64-apple-darwin
+          - host: macos-14
+            target: aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          # Cross targets via zig (napi build --zig)
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            zig: true
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            zig: true
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            zig: true
+    name: build-${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - uses: goto-bus-stop/setup-zig@v2
+        if: ${{ matrix.settings.zig }}
+        with:
+          version: 0.13.0
+      - run: npm ci
+      - name: Build
+        run: >-
+          napi build --platform --release
+          --target ${{ matrix.settings.target }}
+          --js false
+          ${{ matrix.settings.zig && '--zig' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: '*.node'
+          if-no-files-found: error
+
   publish:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
           cache: npm
-
-      - uses: dtolnay/rust-toolchain@stable
-
       - run: npm ci
 
-      - name: Build native addon
-        run: cargo build --release
+      - name: Download all bindings
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Stage native binary
-        run: |
-          cp target/release/libstrenor.so strenor.node
+      - name: Move bindings into platform package dirs
+        run: napi artifacts --dir artifacts
 
-      - run: npm run build
-      - run: npm run test:coverage
+      - name: Build JS bundle
+        run: npm run build:ts
 
-      # Prerelease tags (e.g. v0.0.1-alpha.0) publish under the `alpha` dist-tag.
+      # Prerelease tags (e.g. v0.0.1-alpha.0) publish under the alpha dist-tag.
       - name: Publish
         run: |
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-            npm publish --tag alpha --access public
-          else
-            npm publish --access public
-          fi
+          TAG=latest
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then TAG=alpha; fi
+          npm publish --tag "$TAG" --access public --workspaces --if-present
+          npm publish --tag "$TAG" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

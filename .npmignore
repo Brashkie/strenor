@@ -3,6 +3,8 @@ src/
 __tests__/
 crates/
 scripts/
+examples/
+media/
 
 # Configs & tooling
 tsconfig.json
@@ -19,3 +21,5 @@ coverage/
 *.snap
 *.tsbuildinfo
 .DS_Store
+dist-native/
+*.node

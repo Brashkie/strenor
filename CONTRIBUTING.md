@@ -13,7 +13,7 @@ Thanks for your interest! Strenor is in alpha, so the internals can still move.
 ```bash
 npm install
 
-# Build the native addon (Rust). Locally this is done via Vekziun;
+# Build the native addon (Rust). Locally this is done via @napi-rs/cli;
 # for a plain Linux build:
 cargo build --release
 cp target/release/libstrenor.so strenor.node   # Windows: target\release\strenor.dll

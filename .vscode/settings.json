@@ -1,0 +1,40 @@
+{
+  // rust-analyzer cannot fully expand napi-derive's `#[napi]` proc-macro, which
+  // produces a false "Did not find struct ... parsed before expand" error on the
+  // impl block. Ignoring the macro expansion silences it (the code still compiles
+  // fine — `napi build` / `cargo build` are the source of truth).
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "rust-analyzer.procMacro.ignored": {
+    "napi-derive": ["napi"]
+  },
+
+  // Project vocabulary for the Code Spell Checker extension.
+  "cSpell.words": [
+    "napi",
+    "Strenor",
+    "strenor",
+    "msgpack",
+    "cbor",
+    "bincode",
+    "cdylib",
+    "dylib",
+    "gnueabihf",
+    "aarch",
+    "musl",
+    "gnu",
+    "eabi",
+    "tsup",
+    "tsx",
+    "vitest",
+    "biome",
+    "unref",
+    "Brashkie",
+    "Hepein",
+    "WinsiBot",
+    "Vekziun",
+    "rustup",
+    "Ubuntu",
+    "keyv"
+  ]
+}

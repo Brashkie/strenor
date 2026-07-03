@@ -14,10 +14,18 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "*.node", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "README.es.md",
+    "LICENSE",
+    "ROADMAP.md",
+    "ECOSYSTEM.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
-    "build": "tsup",
-    "build:native": "echo \"build the Rust addon with Vekziun (manifest: Cargo.toml (root)) and place strenor.node at the package root\" && exit 1",
+    "build": "npm run build:native && npm run build:ts",
+    "build:native": "napi build --platform --release --js false",
     "typecheck": "tsc",
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -27,7 +35,16 @@
     "test:coverage": "vitest run --coverage",
     "presmoke": "tsup",
     "smoke": "tsx scripts/smoke.ts",
-    "prepublishOnly": "tsup"
+    "prepublishOnly": "tsup",
+    "build:native:debug": "napi build --platform --js false",
+    "build:ts": "tsup",
+    "artifacts": "napi artifacts",
+    "version:native": "napi version",
+    "example:basic": "node examples/basic.mjs",
+    "example:cache": "node examples/cache.mjs",
+    "example:session": "node examples/session-store.mjs",
+    "example:codec": "node examples/codec.mjs",
+    "examples": "npm run example:basic && npm run example:cache && npm run example:session && npm run example:codec"
   },
   "keywords": ["kv", "key-value", "cache", "embedded", "in-memory", "rust", "napi", "store", "ttl"],
   "author": "Hepein Oficial (Brashkie)",
@@ -37,18 +54,51 @@
     "url": "git+https://github.com/Brashkie/strenor.git"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18"
   },
   "publishConfig": {
     "tag": "alpha"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@napi-rs/cli": "^2.18.4",
     "@types/node": "^20.11.0",
     "@vitest/coverage-v8": "^2.1.8",
+    "cross-env": "^7.0.3",
     "tsup": "^8.5.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "cross-env": "^7.0.3"
+  },
+  "napi": {
+    "name": "strenor",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "aarch64-linux-android",
+        "armv7-linux-androideabi"
+      ]
+    }
+  },
+  "optionalDependencies": {
+    "strenor-win32-x64-msvc": "0.0.1-alpha.0",
+    "strenor-darwin-x64": "0.0.1-alpha.0",
+    "strenor-linux-x64-gnu": "0.0.1-alpha.0",
+    "strenor-linux-x64-musl": "0.0.1-alpha.0",
+    "strenor-linux-arm64-gnu": "0.0.1-alpha.0",
+    "strenor-linux-arm64-musl": "0.0.1-alpha.0",
+    "strenor-darwin-arm64": "0.0.1-alpha.0",
+    "strenor-win32-arm64-msvc": "0.0.1-alpha.0",
+    "strenor-android-arm64": "0.0.1-alpha.0",
+    "strenor-android-arm-eabi": "0.0.1-alpha.0"
   }
 }

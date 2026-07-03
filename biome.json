@@ -1,6 +1,8 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "organizeImports": { "enabled": true },
+  "organizeImports": {
+    "enabled": true
+  },
   "linter": {
     "enabled": true,
     "rules": {
@@ -21,6 +23,16 @@
     }
   },
   "files": {
-    "ignore": ["dist", "node_modules", "target", "crate", "coverage"]
+    "ignore": [
+      "dist",
+      "node_modules",
+      "target",
+      "crates",
+      "coverage",
+      ".vscode",
+      "index.js",
+      "index.d.ts",
+      "false"
+    ]
   }
 }
