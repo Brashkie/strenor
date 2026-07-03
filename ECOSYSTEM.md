@@ -11,29 +11,27 @@ real need forces a split.** No splitting for symmetry — the question is always
 Today, three kinds of packages exist (or are planned) around Strenor:
 
 ```
-strenor                     ← the core (flagship, unscoped, memorable)
-├── strenor-win32-x64-msvc  ← native binaries, one per platform
-├── strenor-darwin-arm64      (resolved automatically via optionalDependencies;
-├── strenor-linux-x64-gnu      you never install these directly)
-└── strenor-linux-x64-musl  …
+strenor                            ← the core (flagship, unscoped, memorable)
+├── @strenor/binary-win32-x64-msvc ← native binaries, one per platform
+├── @strenor/binary-darwin-arm64     (resolved automatically via
+├── @strenor/binary-linux-x64-gnu     optionalDependencies — never installed
+└── @strenor/binary-linux-x64-musl …  by hand)
 
-@strenor/*                  ← tooling, published under the @strenor npm scope
-├── @strenor/cli
-├── @strenor/bench
-├── @strenor/inspector
-└── @strenor/backup
+@strenor/cli · @strenor/bench …    ← tooling, under the @strenor scope
 ```
 
 - **`strenor`** — the core engine. Unscoped and flagship, so `npm install strenor`
-  stays the memorable entry point (the `vue` + `@vue/*`, `svelte` + `@sveltejs/*`
-  pattern).
-- **`strenor-<platform>`** — prebuilt native binaries. Managed by `@napi-rs/cli`,
-  installed transparently as `optionalDependencies`. Users never touch these.
-- **`@strenor/*`** — the tooling ecosystem, under a dedicated npm scope so the
-  names are clean and grouped.
+  stays the memorable entry point (the `sharp` model: unscoped main + scoped
+  binaries).
+- **`@strenor/binary-<platform>`** — prebuilt native binaries. Managed by
+  `@napi-rs/cli`, installed transparently as `optionalDependencies`. Users never
+  touch these.
+- **`@strenor/*`** — the tooling ecosystem, under the same npm scope so the names
+  are clean and grouped.
 
-> Using the `@strenor` scope requires owning that npm org. The core stays
-> `strenor`; only the tools are scoped.
+> The `@strenor` scope requires an npm **organization** named `strenor` (free for
+> public packages). Create it once; the core package stays the unscoped `strenor`,
+> and everything else — binaries and tools — lives under `@strenor/*`.
 
 ## Planned `@strenor/*` packages
 

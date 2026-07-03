@@ -88,18 +88,21 @@
         "aarch64-linux-android",
         "armv7-linux-androideabi"
       ]
+    },
+    "package": {
+      "name": "@strenor/binary"
     }
   },
   "optionalDependencies": {
-    "strenor-win32-x64-msvc": "0.0.1-alpha.0",
-    "strenor-darwin-x64": "0.0.1-alpha.0",
-    "strenor-linux-x64-gnu": "0.0.1-alpha.0",
-    "strenor-linux-x64-musl": "0.0.1-alpha.0",
-    "strenor-linux-arm64-gnu": "0.0.1-alpha.0",
-    "strenor-linux-arm64-musl": "0.0.1-alpha.0",
-    "strenor-darwin-arm64": "0.0.1-alpha.0",
-    "strenor-win32-arm64-msvc": "0.0.1-alpha.0",
-    "strenor-android-arm64": "0.0.1-alpha.0",
-    "strenor-android-arm-eabi": "0.0.1-alpha.0"
+    "@strenor/binary-win32-x64-msvc": "0.0.1-alpha.0",
+    "@strenor/binary-darwin-x64": "0.0.1-alpha.0",
+    "@strenor/binary-linux-x64-gnu": "0.0.1-alpha.0",
+    "@strenor/binary-linux-x64-musl": "0.0.1-alpha.0",
+    "@strenor/binary-linux-arm64-gnu": "0.0.1-alpha.0",
+    "@strenor/binary-linux-arm64-musl": "0.0.1-alpha.0",
+    "@strenor/binary-darwin-arm64": "0.0.1-alpha.0",
+    "@strenor/binary-win32-arm64-msvc": "0.0.1-alpha.0",
+    "@strenor/binary-android-arm64": "0.0.1-alpha.0",
+    "@strenor/binary-android-arm-eabi": "0.0.1-alpha.0"
   }
 }

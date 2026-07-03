@@ -358,10 +358,10 @@ Android (x64/arm64).
 ## Ecosistema
 
 Hoy Strenor es un **solo paquete**: `strenor` (el núcleo) más paquetes nativos
-por plataforma resueltos automáticamente vía `optionalDependencies`. El tooling
-planeado vive bajo el scope `@strenor/*` (`@strenor/cli`, `@strenor/bench`,
-`@strenor/inspector`, `@strenor/backup`) — se añade solo cuando una pieza tiene
-un consumidor real por separado.
+scoped por plataforma (`@strenor/binary-*`) resueltos automáticamente vía
+`optionalDependencies`. El tooling planeado vive bajo el scope `@strenor/*`
+(`@strenor/cli`, `@strenor/bench`, `@strenor/inspector`, `@strenor/backup`) — se
+añade solo cuando una pieza tiene un consumidor real por separado.
 
 Strenor es una responsabilidad clara dentro de un conjunto más amplio de
 proyectos independientes: **Vekziun** (tooling de build nativo) → **Strenor** (KV

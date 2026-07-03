@@ -355,8 +355,9 @@ public benchmarks, and full Windows/Linux/macOS/Android (x64/arm64) support.
 
 ## Ecosystem
 
-Today Strenor is a **single package**: `strenor` (the core) plus per-platform
-native packages resolved automatically via `optionalDependencies`. Planned
+Today Strenor is a **single package**: `strenor` (the core) plus scoped
+per-platform native packages (`@strenor/binary-*`) resolved automatically via
+`optionalDependencies`. Planned
 tooling lives under the `@strenor/*` scope (`@strenor/cli`, `@strenor/bench`,
 `@strenor/inspector`, `@strenor/backup`) — added only when a piece has a real
 standalone user.

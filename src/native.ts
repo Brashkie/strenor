@@ -70,7 +70,7 @@ function load(): NativeBinding {
     return require(local) as NativeBinding;
   }
   // 2) platform package from optionalDependencies.
-  const pkg = `strenor-${suffix}`;
+  const pkg = `@strenor/binary-${suffix}`;
   try {
     return require(pkg) as NativeBinding;
   } catch (err) {
