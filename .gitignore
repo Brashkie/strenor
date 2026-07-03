@@ -1,21 +1,52 @@
-# deps
+# ─── Dependencies ───────────────────────────────────────────────
 node_modules/
+.pnp
+.pnp.*
 
-# TS build output
+# ─── TypeScript / bundler output ────────────────────────────────
 dist/
+*.tsbuildinfo
 
-# Rust build output
-
+# ─── Rust build output ──────────────────────────────────────────
 target/
+**/*.rs.bk
 
-# native addon binaries (built per-platform by @napi-rs/cli)
+# ─── Native addon (built per-platform by @napi-rs/cli) ──────────
 *.node
+# napi-generated bindings at the repo root (we ship our own loader)
+/index.js
+/index.d.ts
+# stray artifact if `napi build --dts false` is ever run
+/false
 
-# logs / misc
-*.log
-.DS_Store
-# napi-rs generated / staging
-index.js
-index.d.ts
+# ─── napi publish staging ───────────────────────────────────────
 npm/
 artifacts/
+
+# ─── Tests & coverage ───────────────────────────────────────────
+coverage/
+*.lcov
+.nyc_output/
+
+# ─── Local snapshots from examples/tests ────────────────────────
+*.snap
+
+# ─── Editor / OS (keep shared VS Code config) ───────────────────
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── Env / secrets ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Logs ───────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*

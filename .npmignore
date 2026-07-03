@@ -1,25 +1,46 @@
-# Source & build inputs (only dist/ ships)
+# The published tarball is governed by the "files" whitelist in package.json
+# (dist/ + docs). This .npmignore is an explicit belt-and-suspenders list of
+# everything that must never end up in the npm package.
+
+# ─── Source & build inputs ──────────────────────────────────────
 src/
-__tests__/
 crates/
-scripts/
+build.rs
+Cargo.toml
+Cargo.lock
+
+# ─── Tests, examples, scripts, assets ───────────────────────────
+__tests__/
 examples/
+scripts/
 media/
 
-# Configs & tooling
-tsconfig.json
-vitest.config.ts
-tsup.config.ts
-biome.json
-.editorconfig
+# ─── Tooling & CI config ────────────────────────────────────────
 .github/
+.vscode/
+.editorconfig
+.gitattributes
 .gitignore
+.npmignore
+biome.json
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
 
-# Local/dev artifacts
+# ─── Build artifacts & staging (not part of the main package) ───
 coverage/
-*.log
-*.snap
-*.tsbuildinfo
-.DS_Store
-dist-native/
+target/
+npm/
+artifacts/
+index.js
+index.d.ts
+false
 *.node
+*.tsbuildinfo
+*.snap
+*.lcov
+
+# ─── OS / logs ──────────────────────────────────────────────────
+*.log
+.DS_Store
+Thumbs.db
