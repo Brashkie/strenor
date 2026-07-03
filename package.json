@@ -38,13 +38,14 @@
     "prepublishOnly": "tsup",
     "build:native:debug": "napi build --platform --js false",
     "build:ts": "tsup",
-    "artifacts": "napi artifacts",
+    "artifacts": "napi artifacts -d artifacts",
     "version:native": "napi version",
     "example:basic": "node examples/basic.mjs",
     "example:cache": "node examples/cache.mjs",
     "example:session": "node examples/session-store.mjs",
     "example:codec": "node examples/codec.mjs",
-    "examples": "npm run example:basic && npm run example:cache && npm run example:session && npm run example:codec"
+    "examples": "npm run example:basic && npm run example:cache && npm run example:session && npm run example:codec",
+    "create-npm-dirs": "napi create-npm-dir -t ."
   },
   "keywords": ["kv", "key-value", "cache", "embedded", "in-memory", "rust", "napi", "store", "ttl"],
   "author": "Hepein Oficial (Brashkie)",
