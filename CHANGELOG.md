@@ -6,11 +6,18 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.1-alpha.1] - 2026-07-04
+
+### Changed
+
+- Restructured the Rust side into a Cargo **workspace**: a pure, unit-tested
+  `strenor-store` core and a thin `strenor-node` NAPI binding. Adds Rust unit
+  tests, clippy, and rustfmt to CI.
+- Scoped per-platform native packages under `@strenor/binary-*`.
+
 ### Added
 
-- Multi-platform native distribution via @napi-rs/cli (`napi` config, per-platform
-  optionalDependencies, self-contained musl-aware loader).
-- Dual ESM + CommonJS build via tsup, with bundled loader (no ESM-only runtime dep).
+- `NOTICE` and `SECURITY.md`.
 
 ## [0.0.1-alpha.0]
 
@@ -27,5 +34,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.0...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.1...HEAD
+[0.0.1-alpha.1]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.0...v0.0.1-alpha.1
 [0.0.1-alpha.0]: https://github.com/Brashkie/strenor/releases/tag/v0.0.1-alpha.0

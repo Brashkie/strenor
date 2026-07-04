@@ -261,7 +261,7 @@ el formato seguro de extender sin romper datos existentes.
 
 Tres capas, cada una con una tarea:
 
-1. **Núcleo Rust (`crates/lib.rs`)** — un mapa en memoria de `key -> (bytes,
+1. **Núcleo Rust (`crates/strenor-store`)** — un mapa en memoria de `key -> (bytes,
    expiración)` protegido por un lock. No sabe nada de tipos; guarda bytes opacos
    `[tag][payload]`, maneja TTL (expiración perezosa + `sweep`) y lee/escribe el
    snapshot binario. Pequeño, rápido y agnóstico al valor por diseño.
@@ -317,10 +317,10 @@ Targets soportados: Windows (x64/arm64), macOS (x64/arm64), Linux glibc y musl
 
 ```
 strenor/
-├── Cargo.toml             # en la raíz (convención napi)
-├── build.rs
+├── Cargo.toml             # workspace de Rust (en la raíz)
 ├── crates/
-│   └── lib.rs             # núcleo Rust: store agnóstico + TTL + snapshot
+│   ├── strenor-store/     # núcleo Rust puro (store + TTL + snapshot, con tests)
+│   └── strenor-node/      # binding NAPI delgado (cdylib)
 ├── src/                   # TypeScript (puro)
 │   ├── index.ts           # API pública: tags, codecs, helpers, sweeper de TTL
 │   └── native.ts          # loader nativo (convención napi-rs)

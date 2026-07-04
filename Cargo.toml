@@ -1,21 +1,13 @@
-[package]
-name = "strenor"
+[workspace]
+members = ["crates/strenor-store", "crates/strenor-node"]
+resolver = "2"
+
+[workspace.package]
 version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
-description = "Embedded high-performance KV store core for Node.js (Rust + NAPI)"
-
-[lib]
-name = "strenor"
-path = "crates/lib.rs"
-crate-type = ["cdylib"]
-
-[dependencies]
-napi = { version = "2", features = ["napi8"] }
-napi-derive = "2"
-
-[build-dependencies]
-napi-build = "2"
+authors = ["Hepein Oficial (Brashkie)"]
+repository = "https://github.com/Brashkie/strenor"
 
 [profile.release]
 lto = true

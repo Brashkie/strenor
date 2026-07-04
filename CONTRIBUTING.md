@@ -4,7 +4,8 @@ Thanks for your interest! Strenor is in alpha, so the internals can still move.
 
 ## Layout
 
-- `Cargo.toml` (root) + `crates/lib.rs` — Rust core (byte store, TTL, snapshot).
+- `crates/strenor-store/` — pure Rust core (byte store, TTL, snapshot; `cargo test`).
+- `crates/strenor-node/` — thin NAPI binding (cdylib).
 - `src/` — TypeScript public API (tags, codecs, helpers).
 - `test/` — Vitest suite (runs against the compiled `dist/`).
 

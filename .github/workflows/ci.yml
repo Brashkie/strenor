@@ -42,6 +42,20 @@ jobs:
       - run: npm run check
       - run: npm run typecheck
 
+  # ── Rust: format, lint, unit tests (pure core) ────────────────────────────
+  rust:
+    name: Rust fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test -p strenor-store
+
   # ── JS tests + 100% coverage (host build) ─────────────────────────────────
   test:
     name: Test & coverage

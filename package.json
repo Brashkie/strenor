@@ -1,6 +1,6 @@
 {
   "name": "strenor",
-  "version": "0.0.1-alpha.0",
+  "version": "0.0.1-alpha.1",
   "description": "Embedded high-performance key-value store for Node.js, powered by Rust. In-process, no server, no config.",
   "type": "module",
   "main": "dist/index.cjs",
@@ -21,11 +21,13 @@
     "LICENSE",
     "ROADMAP.md",
     "ECOSYSTEM.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "NOTICE",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "npm run build:native && npm run build:ts",
-    "build:native": "napi build --platform --release --js false",
+    "build:native": "napi build --platform --release --js false --cargo-cwd crates/strenor-node",
     "typecheck": "tsc",
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -36,7 +38,7 @@
     "presmoke": "tsup",
     "smoke": "tsx scripts/smoke.ts",
     "prepublishOnly": "tsup",
-    "build:native:debug": "napi build --platform --js false",
+    "build:native:debug": "napi build --platform --js false --cargo-cwd crates/strenor-node",
     "build:ts": "tsup",
     "artifacts": "napi artifacts -d artifacts",
     "version:native": "napi version",
@@ -45,7 +47,10 @@
     "example:session": "node examples/session-store.mjs",
     "example:codec": "node examples/codec.mjs",
     "examples": "npm run example:basic && npm run example:cache && npm run example:session && npm run example:codec",
-    "create-npm-dirs": "napi create-npm-dir -t ."
+    "create-npm-dirs": "napi create-npm-dir -t .",
+    "test:rust": "cargo test -p strenor-store",
+    "clippy": "cargo clippy --workspace --all-targets -- -D warnings",
+    "format:rust": "cargo fmt --all"
   },
   "keywords": ["kv", "key-value", "cache", "embedded", "in-memory", "rust", "napi", "store", "ttl"],
   "author": "Hepein Oficial (Brashkie)",
@@ -94,15 +99,15 @@
     }
   },
   "optionalDependencies": {
-    "@strenor/binary-win32-x64-msvc": "0.0.1-alpha.0",
-    "@strenor/binary-darwin-x64": "0.0.1-alpha.0",
-    "@strenor/binary-linux-x64-gnu": "0.0.1-alpha.0",
-    "@strenor/binary-linux-x64-musl": "0.0.1-alpha.0",
-    "@strenor/binary-linux-arm64-gnu": "0.0.1-alpha.0",
-    "@strenor/binary-linux-arm64-musl": "0.0.1-alpha.0",
-    "@strenor/binary-darwin-arm64": "0.0.1-alpha.0",
-    "@strenor/binary-win32-arm64-msvc": "0.0.1-alpha.0",
-    "@strenor/binary-android-arm64": "0.0.1-alpha.0",
-    "@strenor/binary-android-arm-eabi": "0.0.1-alpha.0"
+    "@strenor/binary-win32-x64-msvc": "0.0.1-alpha.1",
+    "@strenor/binary-darwin-x64": "0.0.1-alpha.1",
+    "@strenor/binary-linux-x64-gnu": "0.0.1-alpha.1",
+    "@strenor/binary-linux-x64-musl": "0.0.1-alpha.1",
+    "@strenor/binary-linux-arm64-gnu": "0.0.1-alpha.1",
+    "@strenor/binary-linux-arm64-musl": "0.0.1-alpha.1",
+    "@strenor/binary-darwin-arm64": "0.0.1-alpha.1",
+    "@strenor/binary-win32-arm64-msvc": "0.0.1-alpha.1",
+    "@strenor/binary-android-arm64": "0.0.1-alpha.1",
+    "@strenor/binary-android-arm-eabi": "0.0.1-alpha.1"
   }
 }

@@ -260,7 +260,7 @@ safe to extend without breaking existing data.
 
 Three layers, each with one job:
 
-1. **Rust core (`crates/lib.rs`)** — an in-memory map of `key -> (bytes, expiry)`
+1. **Rust core (`crates/strenor-store`)** — an in-memory map of `key -> (bytes, expiry)`
    behind a lock. It knows nothing about types; it stores opaque `[tag][payload]`
    bytes, handles TTL (lazy expiration + `sweep`), and reads/writes the binary
    snapshot. Small, fast, value-agnostic by design.
@@ -315,10 +315,10 @@ Supported targets: Windows (x64/arm64), macOS (x64/arm64), Linux glibc & musl
 
 ```
 strenor/
-├── Cargo.toml             # at the repo root (napi convention)
-├── build.rs
+├── Cargo.toml             # Rust workspace (at the repo root)
 ├── crates/
-│   └── lib.rs             # Rust core: agnostic byte store + TTL + snapshot
+│   ├── strenor-store/     # pure Rust core (byte store + TTL + snapshot, unit-tested)
+│   └── strenor-node/      # thin NAPI binding (cdylib)
 ├── src/                   # TypeScript (pure)
 │   ├── index.ts           # public API: tags, codecs, helpers, TTL sweeper
 │   └── native.ts          # native loader (napi-rs convention)
