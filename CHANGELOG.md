@@ -6,7 +6,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.0] - 2026-07-04
+
+### Added
+
+- **Lists** — queues and stacks backed by a native `VecDeque`, O(1) at both ends:
+  `enqueue`/`dequeue` (FIFO), `push`/`pop` (LIFO), `llen`, `lrange`, and Redis-style
+  aliases `lpush`/`rpush`/`lpop`/`rpop`. Elements reuse the same tagged value
+  format and codecs as `set`/`get`.
+- Redis-style `WRONGTYPE` errors when an operation targets the wrong structure.
+
+### Changed
+
+- Snapshot format bumped to v2 (adds list entries); v1 snapshots still load.
+
 ## [0.0.1-alpha.1] - 2026-07-04
+
+### Added
+
+- `NOTICE` and `SECURITY.md`.
 
 ### Changed
 
@@ -14,10 +32,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `strenor-store` core and a thin `strenor-node` NAPI binding. Adds Rust unit
   tests, clippy, and rustfmt to CI.
 - Scoped per-platform native packages under `@strenor/binary-*`.
-
-### Added
-
-- `NOTICE` and `SECURITY.md`.
 
 ## [0.0.1-alpha.0]
 
@@ -34,6 +48,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.1...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.1.0-alpha.0...HEAD
+[0.1.0-alpha.0]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.1...v0.1.0-alpha.0
 [0.0.1-alpha.1]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.0...v0.0.1-alpha.1
 [0.0.1-alpha.0]: https://github.com/Brashkie/strenor/releases/tag/v0.0.1-alpha.0

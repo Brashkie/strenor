@@ -200,6 +200,72 @@ describe('Strenor', () => {
     });
   });
 
+  describe('lists', () => {
+    it('enqueue/dequeue is FIFO and returns length / null', () => {
+      expect(db.enqueue('q', 'a')).toBe(1);
+      expect(db.enqueue('q', 'b')).toBe(2);
+      expect(db.llen('q')).toBe(2);
+      expect(db.dequeue('q')).toBe('a');
+      expect(db.dequeue('q')).toBe('b');
+      expect(db.dequeue('q')).toBeNull(); // empty
+      expect(db.exists('q')).toBe(false); // empty list key removed
+    });
+
+    it('push/pop is LIFO', () => {
+      expect(db.push('s', 1)).toBe(1);
+      db.push('s', 2);
+      expect(db.pop('s')).toBe(2);
+      expect(db.pop('s')).toBe(1);
+      expect(db.pop('s')).toBeNull();
+    });
+
+    it('preserves element types via codecs', () => {
+      db.enqueue('mix', { id: 1 });
+      db.enqueue('mix', 'hola');
+      db.enqueue('mix', Buffer.from([1, 2, 3]));
+      expect(db.dequeue('mix')).toEqual({ id: 1 });
+      expect(db.dequeue('mix')).toBe('hola');
+      const buf = db.dequeue<Buffer>('mix');
+      expect(Buffer.isBuffer(buf) && buf.equals(Buffer.from([1, 2, 3]))).toBe(true);
+    });
+
+    it('lrange supports positive and negative indices', () => {
+      for (const c of ['a', 'b', 'c', 'd']) db.enqueue('l', c);
+      expect(db.lrange('l', 0, -1)).toEqual(['a', 'b', 'c', 'd']);
+      expect(db.lrange('l', 1, 2)).toEqual(['b', 'c']);
+      expect(db.lrange('l', -2, -1)).toEqual(['c', 'd']);
+      expect(db.lrange('missing', 0, -1)).toEqual([]);
+      expect(db.llen('missing')).toBe(0);
+    });
+
+    it('supports Redis-style directional aliases', () => {
+      expect(db.rpush('r', 'tail')).toBe(1);
+      expect(db.lpush('r', 'head')).toBe(2);
+      expect(db.lrange('r', 0, -1)).toEqual(['head', 'tail']);
+      expect(db.lpop('r')).toBe('head');
+      expect(db.rpop('r')).toBe('tail');
+      expect(db.lpop('r')).toBeNull();
+      expect(db.rpop('r')).toBeNull();
+    });
+
+    it('lists honor TTL', () => {
+      db.enqueue('tl', 'x');
+      expect(db.expire('tl', 5000)).toBe(true);
+      expect(db.ttl('tl')).toBeGreaterThan(0);
+    });
+
+    it('throws WRONGTYPE on mismatched operations', () => {
+      db.set('bytes', 'hola');
+      expect(() => db.enqueue('bytes', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.dequeue('bytes')).toThrow(/WRONGTYPE/);
+      expect(() => db.llen('bytes')).toThrow(/WRONGTYPE/);
+      expect(() => db.lrange('bytes', 0, -1)).toThrow(/WRONGTYPE/);
+
+      db.enqueue('list', 'x');
+      expect(() => db.get('list')).toThrow(/WRONGTYPE/);
+    });
+  });
+
   describe('lifecycle', () => {
     it('close() stops a background sweeper without throwing', () => {
       const withSweeper = new Strenor({ sweepInterval: 10 });

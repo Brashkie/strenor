@@ -242,6 +242,32 @@ Operaciones núcleo (todas síncronas):
 Un `Codec` es `{ tag, encode(value) => Buffer, decode(bytes) => value }` con un
 byte `tag` en `0x20..0xFE`. Las definiciones de tipos van en `dist/index.d.ts`.
 
+### Listas (colas y pilas)
+
+Las listas usan un deque nativo — **O(1) en ambos extremos**. Cada elemento usa el
+mismo formato etiquetado y codecs que los valores, así que puedes encolar objetos,
+strings o buffers y recuperarlos decodificados.
+
+| Método | Descripción |
+|---|---|
+| `enqueue(key, value, opts?)` | Agrega al final; devuelve la nueva longitud |
+| `dequeue<T>(key)` | Saca y devuelve el frente (FIFO); `null` si está vacía |
+| `push(key, value, opts?)` | Agrega al final; devuelve la nueva longitud |
+| `pop<T>(key)` | Saca y devuelve el final (LIFO); `null` si está vacía |
+| `llen(key)` | Longitud de la lista (0 si no existe) |
+| `lrange<T>(key, start, stop)` | Elementos en `[start, stop]` (negativos desde el final) |
+| `lpush` / `rpush` / `lpop` / `rpop` | Alias direccionales estilo Redis |
+
+Mezclar tipos lanza un error `WRONGTYPE` estilo Redis: `get` sobre una lista, o una
+operación de lista sobre un valor, lanza.
+
+```ts
+db.enqueue('jobs', { id: 1 }); // -> 1
+db.enqueue('jobs', { id: 2 }); // -> 2
+db.dequeue('jobs'); //            -> { id: 1 }  (FIFO)
+db.llen('jobs'); //               -> 1
+```
+
 ## Formato de valor
 
 Cada valor guardado es `[tag:u8][payload]`. El **núcleo Rust nunca interpreta los

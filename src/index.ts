@@ -187,6 +187,60 @@ export class Strenor {
     return this.db.sweep();
   }
 
+  // ---- lists (queues & stacks) ----
+
+  /** Append `value` to the tail of the list at `key`. Returns the new length. */
+  enqueue(key: string, value: unknown, opts?: WriteOptions): number {
+    return this.db.pushBack(key, this.encode(value, opts));
+  }
+
+  /** Remove and return the head of the list (FIFO). `null` if empty/missing. */
+  dequeue<T = unknown>(key: string): T | null {
+    const b = this.db.popFront(key);
+    return b == null ? null : (this.decode(b) as T);
+  }
+
+  /** Append `value` to the tail of the list. Returns the new length. */
+  push(key: string, value: unknown, opts?: WriteOptions): number {
+    return this.db.pushBack(key, this.encode(value, opts));
+  }
+
+  /** Remove and return the tail of the list (LIFO). `null` if empty/missing. */
+  pop<T = unknown>(key: string): T | null {
+    const b = this.db.popBack(key);
+    return b == null ? null : (this.decode(b) as T);
+  }
+
+  /** List length (0 if missing). Throws `WRONGTYPE` if `key` holds a value. */
+  llen(key: string): number {
+    return this.db.llen(key);
+  }
+
+  /** Elements in `[start, stop]` (Redis-style; negative indices from the end). */
+  lrange<T = unknown>(key: string, start: number, stop: number): T[] {
+    return this.db.lrange(key, start, stop).map((b) => this.decode(b) as T);
+  }
+
+  // Redis-style directional aliases.
+  /** Prepend to the head. Returns the new length. */
+  lpush(key: string, value: unknown, opts?: WriteOptions): number {
+    return this.db.pushFront(key, this.encode(value, opts));
+  }
+  /** Append to the tail. Returns the new length. */
+  rpush(key: string, value: unknown, opts?: WriteOptions): number {
+    return this.db.pushBack(key, this.encode(value, opts));
+  }
+  /** Remove and return the head. `null` if empty/missing. */
+  lpop<T = unknown>(key: string): T | null {
+    const b = this.db.popFront(key);
+    return b == null ? null : (this.decode(b) as T);
+  }
+  /** Remove and return the tail. `null` if empty/missing. */
+  rpop<T = unknown>(key: string): T | null {
+    const b = this.db.popBack(key);
+    return b == null ? null : (this.decode(b) as T);
+  }
+
   // ---- persistence ----
 
   /** Dump full state to a self-describing binary snapshot. */

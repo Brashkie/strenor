@@ -241,6 +241,32 @@ Core operations (all synchronous):
 A `Codec` is `{ tag, encode(value) => Buffer, decode(bytes) => value }` with a
 `tag` byte in `0x20..0xFE`. Full type definitions ship in `dist/index.d.ts`.
 
+### Lists (queues & stacks)
+
+Lists are backed by a native double-ended queue — **O(1) at both ends**. Elements
+use the same tagged format and codecs as values, so you can enqueue objects,
+strings, or buffers and get them back decoded.
+
+| Method | Description |
+|---|---|
+| `enqueue(key, value, opts?)` | Append to the tail; returns new length |
+| `dequeue<T>(key)` | Remove & return the head (FIFO); `null` if empty |
+| `push(key, value, opts?)` | Append to the tail; returns new length |
+| `pop<T>(key)` | Remove & return the tail (LIFO); `null` if empty |
+| `llen(key)` | List length (0 if missing) |
+| `lrange<T>(key, start, stop)` | Elements in `[start, stop]` (negative from end) |
+| `lpush` / `rpush` / `lpop` / `rpop` | Redis-style directional aliases |
+
+Mixing types raises a Redis-style `WRONGTYPE` error: `get` on a list, or a list
+operation on a plain value, throws.
+
+```ts
+db.enqueue('jobs', { id: 1 }); // -> 1
+db.enqueue('jobs', { id: 2 }); // -> 2
+db.dequeue('jobs'); //            -> { id: 1 }  (FIFO)
+db.llen('jobs'); //               -> 1
+```
+
 ## Value format
 
 Every stored value is `[tag:u8][payload]`. The **Rust core never interprets the

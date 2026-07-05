@@ -40,6 +40,9 @@ check('expired after ttl', db.get('session') === null);
 
 const snap = './strenor.smoke.snap';
 db.set('persisted', { ok: true });
+db.enqueue('jobs', { id: 1 });
+db.enqueue('jobs', { id: 2 });
+check('list FIFO', db.dequeue<{ id: number }>('jobs')?.id === 1 && db.llen('jobs') === 1);
 db.dump(snap);
 
 const db2 = new Strenor();

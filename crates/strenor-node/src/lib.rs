@@ -1,12 +1,20 @@
 //! NAPI bindings for Strenor. This crate is a thin FFI wrapper: all real logic
-//! lives in the `strenor-store` crate (which is pure Rust and unit-tested). Here
-//! we only convert between JS values (`Buffer`, `String`) and the core, and do
-//! the snapshot file I/O.
+//! lives in the `strenor-store` crate (pure Rust, unit-tested). Here we only
+//! convert between JS values (`Buffer`, `String`) and the core, surface
+//! `WRONGTYPE` errors, and do the snapshot file I/O.
 
 use napi::bindgen_prelude::Buffer;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use strenor_store::Store;
+use strenor_store::{Store, WrongType};
+
+/// Map a structure-type mismatch to a Redis-style error thrown into JS.
+fn wrongtype(_: WrongType) -> Error {
+    Error::new(
+        Status::GenericFailure,
+        "WRONGTYPE Operation against a key holding the wrong kind of value",
+    )
+}
 
 #[napi]
 pub struct Strenor {
@@ -22,15 +30,22 @@ impl Strenor {
         }
     }
 
+    // ── Bytes (KV) ────────────────────────────────────────────────────────
+
     #[napi]
     pub fn set(&self, key: String, value: Buffer, ttl_ms: Option<i64>) {
         self.store.set(key, value.to_vec(), ttl_ms);
     }
 
     #[napi]
-    pub fn get(&self, key: String) -> Option<Buffer> {
-        self.store.get(&key).map(Buffer::from)
+    pub fn get(&self, key: String) -> Result<Option<Buffer>> {
+        self.store
+            .get(&key)
+            .map(|o| o.map(Buffer::from))
+            .map_err(wrongtype)
     }
+
+    // ── Key management ────────────────────────────────────────────────────
 
     #[napi]
     pub fn del(&self, key: String) -> bool {
@@ -76,6 +91,53 @@ impl Strenor {
     pub fn sweep(&self) -> u32 {
         self.store.sweep()
     }
+
+    // ── List ──────────────────────────────────────────────────────────────
+
+    #[napi]
+    pub fn push_front(&self, key: String, value: Buffer) -> Result<u32> {
+        self.store
+            .push_front(&key, value.to_vec())
+            .map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn push_back(&self, key: String, value: Buffer) -> Result<u32> {
+        self.store
+            .push_back(&key, value.to_vec())
+            .map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn pop_front(&self, key: String) -> Result<Option<Buffer>> {
+        self.store
+            .pop_front(&key)
+            .map(|o| o.map(Buffer::from))
+            .map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn pop_back(&self, key: String) -> Result<Option<Buffer>> {
+        self.store
+            .pop_back(&key)
+            .map(|o| o.map(Buffer::from))
+            .map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn llen(&self, key: String) -> Result<u32> {
+        self.store.llen(&key).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn lrange(&self, key: String, start: i64, stop: i64) -> Result<Vec<Buffer>> {
+        self.store
+            .lrange(&key, start, stop)
+            .map(|v| v.into_iter().map(Buffer::from).collect())
+            .map_err(wrongtype)
+    }
+
+    // ── Snapshot ──────────────────────────────────────────────────────────
 
     #[napi]
     pub fn dump(&self, path: String) -> Result<()> {

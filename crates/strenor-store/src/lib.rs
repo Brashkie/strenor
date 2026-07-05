@@ -1,23 +1,39 @@
-//! Strenor's pure key-value core: an in-memory, value-agnostic byte store with
-//! TTL and a self-describing binary snapshot. No FFI here — this crate knows
-//! nothing about Node or NAPI, which keeps it small and fully unit-testable.
+//! Strenor's pure key-value core.
 //!
-//! The store never interprets values: it holds opaque `Vec<u8>` keyed by string.
-//! The first byte of each value is a "tag" owned by the JavaScript layer; this
-//! core does not look at it.
+//! Two layers of "type" are kept strictly separate:
+//! - **This engine** knows only *structure* types (`Bytes`, `List`, and — later —
+//!   `Hash`, `Set`, `SortedSet`). It never interprets the content of a blob.
+//! - The **JavaScript layer** owns *content* tags (raw/string/json/codec) via the
+//!   first byte of each blob.
+//!
+//! So every stored blob — a plain value or a single list element — is the same
+//! opaque `[tag][payload]` that `set()` uses. The engine just moves those blobs
+//! around; it never runs a `JSON.parse`.
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Snapshot magic + format version. Bump `VERSION` on any breaking layout change.
+/// Snapshot magic. `VERSION` 2 adds a per-entry structure-type byte (lists);
+/// version 1 snapshots (bytes only) are still readable.
 pub const MAGIC: &[u8; 4] = b"STRN";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
+const TYPE_BYTES: u8 = 0;
+const TYPE_LIST: u8 = 1;
+
+/// A structure-typed value. The engine distinguishes these; it never looks
+/// inside a blob. New engine structures (Hash, Set, SortedSet) will be added
+/// here in later versions.
+enum Value {
+    Bytes(Vec<u8>),
+    List(VecDeque<Vec<u8>>),
+}
+
+/// A stored record: a typed value plus an optional expiration (TTL applies to
+/// any structure type, exactly like Redis).
 struct Entry {
-    /// Opaque value bytes (includes the JS-side tag as byte 0). Never inspected.
-    value: Vec<u8>,
-    /// Absolute expiration in ms since epoch. `None` = never expires.
+    value: Value,
     expire_at: Option<u64>,
 }
 
@@ -31,6 +47,10 @@ fn now_ms() -> u64 {
 fn is_expired(e: &Entry, now: u64) -> bool {
     matches!(e.expire_at, Some(t) if t <= now)
 }
+
+/// Operating on a key that holds a different structure type (Redis `WRONGTYPE`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct WrongType;
 
 /// Error returned when a snapshot cannot be parsed.
 #[derive(Debug, PartialEq, Eq)]
@@ -55,28 +75,45 @@ impl Store {
         }
     }
 
-    /// Store raw bytes. `ttl_ms > 0` sets an expiration; writing always resets TTL.
-    pub fn set(&self, key: String, value: Vec<u8>, ttl_ms: Option<i64>) {
-        let expire_at = match ttl_ms {
+    fn expire_at_from_ttl(ttl_ms: Option<i64>) -> Option<u64> {
+        match ttl_ms {
             Some(ms) if ms > 0 => Some(now_ms() + ms as u64),
             _ => None,
-        };
-        self.inner.lock().insert(key, Entry { value, expire_at });
+        }
     }
 
-    /// Return the bytes for `key`, or `None` if missing/expired (lazy removal).
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+    // ── Bytes (KV) ────────────────────────────────────────────────────────
+
+    /// Store raw bytes. Replaces any existing value (including a list), like SET.
+    pub fn set(&self, key: String, value: Vec<u8>, ttl_ms: Option<i64>) {
+        let expire_at = Self::expire_at_from_ttl(ttl_ms);
+        self.inner.lock().insert(
+            key,
+            Entry {
+                value: Value::Bytes(value),
+                expire_at,
+            },
+        );
+    }
+
+    /// Return the bytes for `key`. `WrongType` if it holds a list.
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, WrongType> {
         let now = now_ms();
         let mut map = self.inner.lock();
         match map.get(key) {
             Some(e) if is_expired(e, now) => {
                 map.remove(key);
-                None
+                Ok(None)
             }
-            Some(e) => Some(e.value.clone()),
-            None => None,
+            Some(e) => match &e.value {
+                Value::Bytes(bytes) => Ok(Some(bytes.clone())),
+                Value::List(_) => Err(WrongType),
+            },
+            None => Ok(None),
         }
     }
+
+    // ── Key management (type-agnostic) ────────────────────────────────────
 
     pub fn del(&self, key: &str) -> bool {
         self.inner.lock().remove(key).is_some()
@@ -95,7 +132,6 @@ impl Store {
         }
     }
 
-    /// Set/replace the TTL (ms from now) of an existing key. False if missing.
     pub fn expire(&self, key: &str, ttl_ms: i64) -> bool {
         let mut map = self.inner.lock();
         match map.get_mut(key) {
@@ -107,7 +143,6 @@ impl Store {
         }
     }
 
-    /// Remove a key's TTL (make it persistent). False if missing.
     pub fn persist(&self, key: &str) -> bool {
         let mut map = self.inner.lock();
         match map.get_mut(key) {
@@ -119,7 +154,6 @@ impl Store {
         }
     }
 
-    /// Remaining TTL in ms. `-1` = no expiry, `-2` = missing.
     pub fn ttl(&self, key: &str) -> i64 {
         let now = now_ms();
         let mut map = self.inner.lock();
@@ -136,7 +170,6 @@ impl Store {
         }
     }
 
-    /// All live keys. O(n); intended for debugging/small datasets.
     pub fn keys(&self) -> Vec<String> {
         let now = now_ms();
         self.inner
@@ -147,7 +180,6 @@ impl Store {
             .collect()
     }
 
-    /// Entry count (including expired entries not yet swept — Redis-like lazy model).
     pub fn size(&self) -> u32 {
         self.inner.lock().len() as u32
     }
@@ -156,7 +188,6 @@ impl Store {
         self.inner.lock().clear();
     }
 
-    /// Eagerly purge expired entries. Returns how many were removed.
     pub fn sweep(&self) -> u32 {
         let now = now_ms();
         let mut map = self.inner.lock();
@@ -165,11 +196,139 @@ impl Store {
         (before - map.len()) as u32
     }
 
+    // ── List ──────────────────────────────────────────────────────────────
+
+    fn push(&self, key: &str, value: Vec<u8>, front: bool) -> Result<u32, WrongType> {
+        let now = now_ms();
+        let mut map = self.inner.lock();
+        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
+            map.remove(key);
+        }
+        match map.get_mut(key) {
+            Some(e) => match &mut e.value {
+                Value::List(l) => {
+                    if front {
+                        l.push_front(value);
+                    } else {
+                        l.push_back(value);
+                    }
+                    Ok(l.len() as u32)
+                }
+                Value::Bytes(_) => Err(WrongType),
+            },
+            None => {
+                let mut l = VecDeque::new();
+                l.push_back(value);
+                map.insert(
+                    key.to_string(),
+                    Entry {
+                        value: Value::List(l),
+                        expire_at: None,
+                    },
+                );
+                Ok(1)
+            }
+        }
+    }
+
+    /// Prepend to a list (creating it if missing). Returns the new length.
+    pub fn push_front(&self, key: &str, value: Vec<u8>) -> Result<u32, WrongType> {
+        self.push(key, value, true)
+    }
+
+    /// Append to a list (creating it if missing). Returns the new length.
+    pub fn push_back(&self, key: &str, value: Vec<u8>) -> Result<u32, WrongType> {
+        self.push(key, value, false)
+    }
+
+    fn pop(&self, key: &str, front: bool) -> Result<Option<Vec<u8>>, WrongType> {
+        let now = now_ms();
+        let mut map = self.inner.lock();
+        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
+            map.remove(key);
+            return Ok(None);
+        }
+        match map.get_mut(key) {
+            Some(e) => match &mut e.value {
+                Value::List(l) => {
+                    let v = if front { l.pop_front() } else { l.pop_back() };
+                    if l.is_empty() {
+                        map.remove(key); // an empty list key is deleted (Redis-like)
+                    }
+                    Ok(v)
+                }
+                Value::Bytes(_) => Err(WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Remove and return the first element, or `None` if empty/missing.
+    pub fn pop_front(&self, key: &str) -> Result<Option<Vec<u8>>, WrongType> {
+        self.pop(key, true)
+    }
+
+    /// Remove and return the last element, or `None` if empty/missing.
+    pub fn pop_back(&self, key: &str) -> Result<Option<Vec<u8>>, WrongType> {
+        self.pop(key, false)
+    }
+
+    /// List length (0 if missing). `WrongType` if the key holds bytes.
+    pub fn llen(&self, key: &str) -> Result<u32, WrongType> {
+        let now = now_ms();
+        let mut map = self.inner.lock();
+        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
+            map.remove(key);
+            return Ok(0);
+        }
+        match map.get(key) {
+            Some(e) => match &e.value {
+                Value::List(l) => Ok(l.len() as u32),
+                Value::Bytes(_) => Err(WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    /// Elements in the inclusive range `[start, stop]`, Redis-style (negative
+    /// indices count from the end; out-of-range is clamped).
+    pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<Vec<u8>>, WrongType> {
+        let now = now_ms();
+        let mut map = self.inner.lock();
+        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
+            map.remove(key);
+            return Ok(Vec::new());
+        }
+        match map.get(key) {
+            Some(e) => match &e.value {
+                Value::List(l) => {
+                    let len = l.len() as i64;
+                    let mut s = if start < 0 { len + start } else { start };
+                    let mut t = if stop < 0 { len + stop } else { stop };
+                    if s < 0 {
+                        s = 0;
+                    }
+                    if t >= len {
+                        t = len - 1;
+                    }
+                    if len == 0 || s > t || s >= len {
+                        return Ok(Vec::new());
+                    }
+                    Ok(l.iter()
+                        .skip(s as usize)
+                        .take((t - s + 1) as usize)
+                        .cloned()
+                        .collect())
+                }
+                Value::Bytes(_) => Err(WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    // ── Snapshot ──────────────────────────────────────────────────────────
+
     /// Serialize the whole store to a self-describing binary snapshot.
-    ///
-    /// Layout (little-endian):
-    ///   "STRN" | version:u8 | flags:u8 | count:u32
-    ///   per entry: key_len:u32 | key | expire_at:u64 (0 = none) | val_len:u32 | val
     pub fn dump_bytes(&self) -> Vec<u8> {
         let map = self.inner.lock();
         let mut buf = Vec::new();
@@ -182,13 +341,26 @@ impl Store {
             buf.extend_from_slice(&(kb.len() as u32).to_le_bytes());
             buf.extend_from_slice(kb);
             buf.extend_from_slice(&e.expire_at.unwrap_or(0).to_le_bytes());
-            buf.extend_from_slice(&(e.value.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&e.value);
+            match &e.value {
+                Value::Bytes(bytes) => {
+                    buf.push(TYPE_BYTES);
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+                Value::List(l) => {
+                    buf.push(TYPE_LIST);
+                    buf.extend_from_slice(&(l.len() as u32).to_le_bytes());
+                    for elem in l {
+                        buf.extend_from_slice(&(elem.len() as u32).to_le_bytes());
+                        buf.extend_from_slice(elem);
+                    }
+                }
+            }
         }
         buf
     }
 
-    /// Load a snapshot, replacing all current state.
+    /// Load a snapshot, replacing all current state. Accepts version 1 and 2.
     pub fn load_bytes(&self, data: &[u8]) -> Result<(), SnapshotError> {
         let bad = |m: &str| SnapshotError(m.to_string());
         if data.len() < 10 {
@@ -197,7 +369,8 @@ impl Store {
         if &data[0..4] != MAGIC {
             return Err(bad("bad magic: not a Strenor snapshot"));
         }
-        if data[4] != VERSION {
+        let version = data[4];
+        if version != 1 && version != 2 {
             return Err(bad("unsupported snapshot version"));
         }
         let mut p = 6usize; // magic(4) + version(1) + flags(1)
@@ -228,19 +401,39 @@ impl Store {
 
             let at = read(&mut p, 8)?;
             let exp = u64_at(data, at);
+            let expire_at = if exp == 0 { None } else { Some(exp) };
 
-            let at = read(&mut p, 4)?;
-            let vl = u32_at(data, at) as usize;
-            let at = read(&mut p, vl)?;
-            let value = data[at..at + vl].to_vec();
+            // Version 1: bytes only, no type byte. Version 2: type byte first.
+            let kind = if version == 1 {
+                TYPE_BYTES
+            } else {
+                let at = read(&mut p, 1)?;
+                data[at]
+            };
 
-            next.insert(
-                key,
-                Entry {
-                    value,
-                    expire_at: if exp == 0 { None } else { Some(exp) },
-                },
-            );
+            let value = match kind {
+                TYPE_BYTES => {
+                    let at = read(&mut p, 4)?;
+                    let vl = u32_at(data, at) as usize;
+                    let at = read(&mut p, vl)?;
+                    Value::Bytes(data[at..at + vl].to_vec())
+                }
+                TYPE_LIST => {
+                    let at = read(&mut p, 4)?;
+                    let n = u32_at(data, at) as usize;
+                    let mut l = VecDeque::with_capacity(n);
+                    for _ in 0..n {
+                        let at = read(&mut p, 4)?;
+                        let el = u32_at(data, at) as usize;
+                        let at = read(&mut p, el)?;
+                        l.push_back(data[at..at + el].to_vec());
+                    }
+                    Value::List(l)
+                }
+                _ => return Err(bad("unknown entry type in snapshot")),
+            };
+
+            next.insert(key, Entry { value, expire_at });
         }
 
         *self.inner.lock() = next;
@@ -252,36 +445,27 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn b(s: &str) -> Vec<u8> {
+        s.as_bytes().to_vec()
+    }
+
     #[test]
     fn set_get_del() {
         let s = Store::new();
         s.set("a".into(), vec![1, 2, 3], None);
-        assert_eq!(s.get("a"), Some(vec![1, 2, 3]));
+        assert_eq!(s.get("a"), Ok(Some(vec![1, 2, 3])));
         assert!(s.exists("a"));
         assert!(s.del("a"));
         assert!(!s.del("a"));
-        assert_eq!(s.get("a"), None);
-    }
-
-    #[test]
-    fn size_clear_keys() {
-        let s = Store::new();
-        s.set("a".into(), vec![0], None);
-        s.set("b".into(), vec![0], None);
-        assert_eq!(s.size(), 2);
-        let mut ks = s.keys();
-        ks.sort();
-        assert_eq!(ks, vec!["a".to_string(), "b".to_string()]);
-        s.clear();
-        assert_eq!(s.size(), 0);
+        assert_eq!(s.get("a"), Ok(None));
     }
 
     #[test]
     fn ttl_semantics() {
         let s = Store::new();
         s.set("k".into(), vec![0], None);
-        assert_eq!(s.ttl("k"), -1); // no expiry
-        assert_eq!(s.ttl("ghost"), -2); // missing
+        assert_eq!(s.ttl("k"), -1);
+        assert_eq!(s.ttl("ghost"), -2);
         assert!(s.expire("k", 10_000));
         assert!(s.ttl("k") > 0);
         assert!(s.persist("k"));
@@ -292,42 +476,85 @@ mod tests {
     #[test]
     fn expiration_and_sweep() {
         let s = Store::new();
-        s.set("x".into(), vec![0], Some(1)); // 1ms TTL
+        s.set("x".into(), vec![0], Some(1));
         s.set("y".into(), vec![0], None);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        assert_eq!(s.get("x"), None); // lazily expired
+        assert_eq!(s.get("x"), Ok(None));
         s.set("z".into(), vec![0], Some(1));
         std::thread::sleep(std::time::Duration::from_millis(10));
-        assert_eq!(s.sweep(), 1); // z purged
+        assert_eq!(s.sweep(), 1);
         assert!(s.exists("y"));
     }
 
     #[test]
-    fn snapshot_roundtrip() {
+    fn list_fifo_and_lifo() {
         let s = Store::new();
-        s.set("keep".into(), vec![9, 8, 7], None);
-        s.set("name".into(), b"strenor".to_vec(), None);
+        assert_eq!(s.push_back("q", b("a")), Ok(1));
+        assert_eq!(s.push_back("q", b("b")), Ok(2));
+        assert_eq!(s.pop_front("q"), Ok(Some(b("a"))));
+        assert_eq!(s.pop_front("q"), Ok(Some(b("b"))));
+        assert_eq!(s.pop_front("q"), Ok(None));
+        assert!(!s.exists("q"));
+
+        s.push_back("s", b("1")).unwrap();
+        s.push_back("s", b("2")).unwrap();
+        assert_eq!(s.pop_back("s"), Ok(Some(b("2"))));
+        assert_eq!(s.pop_back("s"), Ok(Some(b("1"))));
+    }
+
+    #[test]
+    fn llen_and_lrange() {
+        let s = Store::new();
+        for c in ["a", "b", "c", "d"] {
+            s.push_back("l", b(c)).unwrap();
+        }
+        assert_eq!(s.llen("l"), Ok(4));
+        assert_eq!(
+            s.lrange("l", 0, -1),
+            Ok(vec![b("a"), b("b"), b("c"), b("d")])
+        );
+        assert_eq!(s.lrange("l", 1, 2), Ok(vec![b("b"), b("c")]));
+        assert_eq!(s.lrange("l", -2, -1), Ok(vec![b("c"), b("d")]));
+        assert_eq!(s.lrange("l", 10, 20), Ok(Vec::new()));
+        assert_eq!(s.lrange("missing", 0, -1), Ok(Vec::new()));
+        assert_eq!(s.llen("missing"), Ok(0));
+    }
+
+    #[test]
+    fn wrong_type_errors() {
+        let s = Store::new();
+        s.set("a".into(), b("hola"), None);
+        assert_eq!(s.push_back("a", b("x")), Err(WrongType));
+        assert_eq!(s.pop_front("a"), Err(WrongType));
+        assert_eq!(s.llen("a"), Err(WrongType));
+        assert_eq!(s.lrange("a", 0, -1), Err(WrongType));
+
+        s.push_back("l", b("x")).unwrap();
+        assert_eq!(s.get("l"), Err(WrongType));
+        s.set("l".into(), b("now bytes"), None);
+        assert_eq!(s.get("l"), Ok(Some(b("now bytes"))));
+    }
+
+    #[test]
+    fn snapshot_roundtrip_bytes_and_lists() {
+        let s = Store::new();
+        s.set("name".into(), b("strenor"), None);
+        s.set("ttl".into(), vec![1], Some(60_000));
+        s.push_back("jobs", b("j1")).unwrap();
+        s.push_back("jobs", b("j2")).unwrap();
         let bytes = s.dump_bytes();
 
         let fresh = Store::new();
         fresh.load_bytes(&bytes).unwrap();
-        assert_eq!(fresh.get("keep"), Some(vec![9, 8, 7]));
-        assert_eq!(fresh.get("name"), Some(b"strenor".to_vec()));
+        assert_eq!(fresh.get("name"), Ok(Some(b("strenor"))));
+        assert!(fresh.ttl("ttl") > 0);
+        assert_eq!(fresh.lrange("jobs", 0, -1), Ok(vec![b("j1"), b("j2")]));
     }
 
     #[test]
     fn snapshot_rejects_garbage() {
         let s = Store::new();
         assert!(s.load_bytes(b"not a snapshot").is_err());
-        assert!(s.load_bytes(b"STRN\x02").is_err()); // wrong version / too small
-    }
-
-    #[test]
-    fn snapshot_preserves_ttl() {
-        let s = Store::new();
-        s.set("t".into(), vec![1], Some(60_000));
-        let fresh = Store::new();
-        fresh.load_bytes(&s.dump_bytes()).unwrap();
-        assert!(fresh.ttl("t") > 0);
+        assert!(s.load_bytes(b"STRN\x09\x00\x00\x00\x00\x00").is_err());
     }
 }

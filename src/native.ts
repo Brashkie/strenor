@@ -18,6 +18,12 @@ export interface NativeStrenorInstance {
   sweep(): number;
   dump(path: string): void;
   load(path: string): void;
+  pushFront(key: string, value: Buffer): number;
+  pushBack(key: string, value: Buffer): number;
+  popFront(key: string): Buffer | null;
+  popBack(key: string): Buffer | null;
+  llen(key: string): number;
+  lrange(key: string, start: number, stop: number): Buffer[];
 }
 
 export interface NativeBinding {
