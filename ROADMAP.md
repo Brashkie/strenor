@@ -28,17 +28,20 @@ honest: **shipped**, **planned**, or **exploratory**.
 - Native Rust addon, multi-platform (Windows, macOS, Linux glibc & musl, x64/arm64)
 - Node 18+, dual ESM + CJS, 100% test coverage
 
-### v0.1.x — Bot primitives · **planned**
+### v0.1.x — Bot primitives · **shipped**
 
 The data structures bots actually reach for, beyond plain KV.
 
-- `list`, `queue`, `stack`, `deque`
-- Atomic counters
-- TTL improvements
+Shipped in `0.1.0`:
+
+- `list` — queues and stacks (`enqueue`/`dequeue`, `push`/`pop`, `llen`, `lrange`,
+  plus Redis aliases), O(1) at both ends via a native `VecDeque`.
+- Atomic counters — `incr` / `decr`.
+- `WRONGTYPE` errors for mismatched structure operations.
 
 ```ts
-db.push(key, value);      db.pop(key);
 db.enqueue(key, value);   db.dequeue(key);
+db.push(key, value);      db.pop(key);
 db.incr(key);             db.decr(key);
 ```
 

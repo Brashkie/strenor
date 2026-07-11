@@ -43,6 +43,8 @@ db.set('persisted', { ok: true });
 db.enqueue('jobs', { id: 1 });
 db.enqueue('jobs', { id: 2 });
 check('list FIFO', db.dequeue<{ id: number }>('jobs')?.id === 1 && db.llen('jobs') === 1);
+db.incr('counter');
+check('counter', db.incr('counter') === 2);
 db.dump(snap);
 
 const db2 = new Strenor();

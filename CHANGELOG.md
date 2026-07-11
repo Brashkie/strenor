@@ -6,6 +6,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-11
+
+First stable release — out of alpha. The KV + list + counter API is stable for
+the `0.1.x` line.
+
+### Added
+
+- **Atomic counters**: `incr` / `decr` (integer, with an optional step). Atomic
+  within Node's single-threaded event loop; a missing key starts at 0.
+
 ## [0.1.0-alpha.0] - 2026-07-04
 
 ### Added
@@ -48,7 +58,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.1.0-alpha.0...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Brashkie/strenor/compare/v0.1.0-alpha.0...v0.1.0
 [0.1.0-alpha.0]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.1...v0.1.0-alpha.0
 [0.0.1-alpha.1]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.0...v0.0.1-alpha.1
 [0.0.1-alpha.0]: https://github.com/Brashkie/strenor/releases/tag/v0.0.1-alpha.0

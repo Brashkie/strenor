@@ -8,7 +8,7 @@
 
 <br />
 
-[![npm](https://img.shields.io/npm/v/strenor/alpha.svg?color=cb3837&label=npm)](https://www.npmjs.com/package/strenor)
+[![npm](https://img.shields.io/npm/v/strenor.svg?color=cb3837&label=npm)](https://www.npmjs.com/package/strenor)
 [![node](https://img.shields.io/badge/node-%3E%3D18-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 [![rust](https://img.shields.io/badge/core-Rust-dea584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](#)
@@ -25,9 +25,9 @@
 
 <br />
 
-> [!WARNING]
-> **Alpha / experimental.** The format and API may still change before `0.1.0`.
-> Install with `npm install strenor@alpha`. Feedback and issues are welcome.
+> [!NOTE]
+> **Stable (0.x).** Out of alpha — the API is stable within the `0.1.x` line.
+> Minor releases (0.2, 0.3, …) may still evolve it before `1.0`.
 
 <details>
 <summary><b>Table of contents</b></summary>
@@ -81,7 +81,7 @@ Strenor is **not** the right tool when:
 ## Install
 
 ```bash
-npm install strenor@alpha
+npm install strenor
 ```
 
 Prebuilt native binaries are shipped per platform, so there is no compile step
@@ -240,6 +240,26 @@ Core operations (all synchronous):
 
 A `Codec` is `{ tag, encode(value) => Buffer, decode(bytes) => value }` with a
 `tag` byte in `0x20..0xFE`. Full type definitions ship in `dist/index.d.ts`.
+
+### Counters
+
+Atomic integer counters — ideal for rate limits, message counts, and sequence
+IDs. A missing key starts at 0. Atomic within Node's single-threaded event loop.
+
+| Method | Description |
+|---|---|
+| `incr(key, by?)` | Add `by` (default 1); returns the new value |
+| `decr(key, by?)` | Subtract `by` (default 1); returns the new value |
+
+```ts
+db.incr('hits');       // -> 1
+db.incr('hits', 10);   // -> 11
+db.decr('hits');       // -> 10
+db.get('hits');        // -> 10  (a counter is just a number)
+```
+
+A counter must be an integer within `Number.MAX_SAFE_INTEGER` (±2^53); other
+values throw. `incr`/`decr` on a list raise `WRONGTYPE`.
 
 ### Lists (queues & stacks)
 

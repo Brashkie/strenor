@@ -187,6 +187,38 @@ export class Strenor {
     return this.db.sweep();
   }
 
+  // ---- counters (atomic within Node's single-threaded event loop) ----
+
+  /** Atomically add to an integer counter by `by` (default 1); missing key = 0. */
+  incr(key: string, by = 1): number {
+    return this.addTo(key, by);
+  }
+
+  /** Atomically subtract from an integer counter by `by` (default 1); missing = 0. */
+  decr(key: string, by = 1): number {
+    return this.addTo(key, -by);
+  }
+
+  // get()+set() with nothing awaited between them: no other JS can interleave in
+  // a single-threaded process, so the read-modify-write is effectively atomic.
+  private addTo(key: string, delta: number): number {
+    const cur = this.get(key); // throws WRONGTYPE if the key holds a list
+    let n: number;
+    if (cur === null) n = 0;
+    else if (typeof cur === 'number') n = cur;
+    else throw new TypeError(`strenor: "${key}" holds a non-numeric value`);
+
+    if (!Number.isInteger(n) || !Number.isInteger(delta)) {
+      throw new TypeError('strenor: counters must be integers');
+    }
+    const next = n + delta;
+    if (!Number.isSafeInteger(next)) {
+      throw new RangeError('strenor: counter would overflow Number.MAX_SAFE_INTEGER');
+    }
+    this.set(key, next);
+    return next;
+  }
+
   // ---- lists (queues & stacks) ----
 
   /** Append `value` to the tail of the list at `key`. Returns the new length. */

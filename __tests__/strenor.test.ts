@@ -200,6 +200,34 @@ describe('Strenor', () => {
     });
   });
 
+  describe('counters', () => {
+    it('incr/decr are atomic and create the key at 0', () => {
+      expect(db.incr('c')).toBe(1);
+      expect(db.incr('c')).toBe(2);
+      expect(db.incr('c', 5)).toBe(7);
+      expect(db.decr('c')).toBe(6);
+      expect(db.decr('c', 2)).toBe(4);
+      expect(db.get('c')).toBe(4); // readable as a plain number
+    });
+
+    it('rejects non-numeric and non-integer values', () => {
+      db.set('s', 'hola');
+      expect(() => db.incr('s')).toThrow(TypeError);
+      db.set('f', 1.5);
+      expect(() => db.incr('f')).toThrow(/integer/);
+    });
+
+    it('rejects overflow beyond the safe integer range', () => {
+      db.set('big', Number.MAX_SAFE_INTEGER);
+      expect(() => db.incr('big')).toThrow(RangeError);
+    });
+
+    it('throws WRONGTYPE when the key holds a list', () => {
+      db.enqueue('l', 'x');
+      expect(() => db.incr('l')).toThrow(/WRONGTYPE/);
+    });
+  });
+
   describe('lists', () => {
     it('enqueue/dequeue is FIFO and returns length / null', () => {
       expect(db.enqueue('q', 'a')).toBe(1);

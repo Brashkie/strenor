@@ -8,7 +8,7 @@
 
 <br />
 
-[![npm](https://img.shields.io/npm/v/strenor/alpha.svg?color=cb3837&label=npm)](https://www.npmjs.com/package/strenor)
+[![npm](https://img.shields.io/npm/v/strenor.svg?color=cb3837&label=npm)](https://www.npmjs.com/package/strenor)
 [![node](https://img.shields.io/badge/node-%3E%3D18-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 [![rust](https://img.shields.io/badge/core-Rust-dea584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](#)
@@ -25,9 +25,9 @@
 
 <br />
 
-> [!WARNING]
-> **Alpha / experimental.** El formato y la API aún pueden cambiar antes de
-> `0.1.0`. Instala con `npm install strenor@alpha`. Se agradecen issues y feedback.
+> [!NOTE]
+> **Estable (0.x).** Fuera del alpha — la API es estable dentro de la línea
+> `0.1.x`. Las versiones minor (0.2, 0.3, …) aún pueden evolucionarla antes de `1.0`.
 
 <details>
 <summary><b>Tabla de contenidos</b></summary>
@@ -81,7 +81,7 @@ Strenor **no** es la herramienta cuando:
 ## Instalación
 
 ```bash
-npm install strenor@alpha
+npm install strenor
 ```
 
 Se distribuyen binarios nativos precompilados por plataforma, así que el
@@ -241,6 +241,27 @@ Operaciones núcleo (todas síncronas):
 
 Un `Codec` es `{ tag, encode(value) => Buffer, decode(bytes) => value }` con un
 byte `tag` en `0x20..0xFE`. Las definiciones de tipos van en `dist/index.d.ts`.
+
+### Contadores
+
+Contadores enteros atómicos — ideales para rate limits, conteo de mensajes e IDs
+secuenciales. Una clave inexistente arranca en 0. Atómico dentro del event loop
+single-thread de Node.
+
+| Método | Descripción |
+|---|---|
+| `incr(key, by?)` | Suma `by` (default 1); devuelve el nuevo valor |
+| `decr(key, by?)` | Resta `by` (default 1); devuelve el nuevo valor |
+
+```ts
+db.incr('hits');       // -> 1
+db.incr('hits', 10);   // -> 11
+db.decr('hits');       // -> 10
+db.get('hits');        // -> 10  (un contador es solo un número)
+```
+
+Un contador debe ser un entero dentro de `Number.MAX_SAFE_INTEGER` (±2^53); otros
+valores lanzan. `incr`/`decr` sobre una lista lanzan `WRONGTYPE`.
 
 ### Listas (colas y pilas)
 
