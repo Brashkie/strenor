@@ -168,7 +168,7 @@ impl Aof {
     fn handle(&mut self) -> io::Result<&mut BufWriter<File>> {
         self.file
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "log is closed"))
+            .ok_or_else(|| io::Error::other("log is closed"))
     }
 
     /// Flush and release the file handle. After this the log is untouchable by

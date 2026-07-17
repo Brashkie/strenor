@@ -316,10 +316,7 @@ impl Store {
     /// writes that were never journalled — data loss with no error.
     fn ensure_open(inner: &Inner) -> std::io::Result<()> {
         if inner.closed {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "store is closed",
-            ));
+            return Err(std::io::Error::other("store is closed"));
         }
         Ok(())
     }
@@ -333,12 +330,8 @@ impl Store {
     pub fn close(&self) -> std::io::Result<()> {
         let mut inner = self.inner.lock();
         inner.closed = true;
-        match inner.aof.as_mut() {
-            Some(a) => {
-                let r = a.close();
-                inner.aof = None;
-                r
-            }
+        match inner.aof.take() {
+            Some(mut a) => a.close(),
             None => Ok(()),
         }
     }

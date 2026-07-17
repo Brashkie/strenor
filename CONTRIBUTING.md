@@ -35,3 +35,10 @@ npm run test:coverage
 The Rust core must stay **value-agnostic**: it only stores opaque
 `[tag][payload]` bytes and never interprets them. Any type/codec logic belongs
 in the TypeScript layer. Keep that boundary intact.
+
+> **The native addon must match your Rust source.** `npm test`, `npm run
+> test:coverage`, and `npm run smoke` rebuild it automatically (`pretest` hooks);
+> the rebuild is incremental, so it costs ~1s when nothing changed. If you run
+> `vitest` directly, build first with `npm run build:native` — otherwise you are
+> testing a stale `.node` and will see confusing errors like
+> `TypeError: this.db.<method> is not a function`.

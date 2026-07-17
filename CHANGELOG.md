@@ -40,6 +40,9 @@ Persistence: Strenor is no longer "memory with a dump".
   while mutations throw, so a write is never dropped from the journal unnoticed.
 - Compaction releases its handle before replacing the log, which Windows
   requires in order to rename over an existing file.
+- `npm test`, `npm run test:coverage`, and `npm run smoke` now rebuild the native
+  addon first (`pretest` hooks). Previously they could silently run against a
+  stale `.node`, producing errors that looked like logic bugs.
 
 ## [0.1.0] - 2026-07-11
 

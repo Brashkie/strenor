@@ -35,7 +35,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "presmoke": "tsup",
+    "presmoke": "npm run build:native && tsup",
     "smoke": "tsx scripts/smoke.ts",
     "prepublishOnly": "tsup",
     "build:native:debug": "napi build --platform --js false --cargo-cwd crates/strenor-node",
@@ -52,7 +52,9 @@
     "clippy": "cargo clippy --workspace --all-targets -- -D warnings",
     "format:rust": "cargo fmt --all",
     "example:queue": "node examples/queue.mjs",
-    "example:durability": "node examples/durability.mjs"
+    "example:durability": "node examples/durability.mjs",
+    "pretest": "npm run build:native",
+    "pretest:coverage": "npm run build:native"
   },
   "keywords": ["kv", "key-value", "cache", "embedded", "in-memory", "rust", "napi", "store", "ttl"],
   "author": "Hepein Oficial (Brashkie)",
