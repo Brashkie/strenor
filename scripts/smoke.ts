@@ -52,5 +52,20 @@ db2.load(snap);
 check('snapshot reload', db2.get<{ ok: boolean }>('persisted')?.ok === true);
 rmSync(snap, { force: true });
 
+// Durability: a fresh instance on the same log must see the first one's writes.
+const aof = './strenor.smoke.aof';
+rmSync(aof, { force: true });
+const durable = new Strenor({ aof });
+durable.set('survives', { restart: true });
+durable.enqueue('q', 'item');
+durable.close();
+
+const reopened = new Strenor({ aof });
+check('aof replay', reopened.get<{ restart: boolean }>('survives')?.restart === true);
+check('aof recovery clean', reopened.recovery?.truncated === false);
+check('aof compact', reopened.compact() > 0);
+reopened.close();
+rmSync(aof, { force: true });
+
 console.log(failed === 0 ? '\nALL PASSED' : `\n${failed} CHECK(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

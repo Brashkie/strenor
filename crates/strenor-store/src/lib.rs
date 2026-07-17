@@ -9,15 +9,27 @@
 //! So every stored blob — a plain value or a single list element — is the same
 //! opaque `[tag][payload]` that `set()` uses. The engine just moves those blobs
 //! around; it never runs a `JSON.parse`.
+//!
+//! Durability is optional: with an append-only log attached (`with_aof`), every
+//! mutation is journalled and replayed on startup.
 
+mod aof;
+
+use aof::Aof;
+pub use aof::{crc32, write_atomic};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Snapshot magic. `VERSION` 2 adds a per-entry structure-type byte (lists);
-/// version 1 snapshots (bytes only) are still readable.
+/// Snapshot magic and current format version.
+/// - v1: bytes only.
+/// - v2: adds a structure-type byte per entry (lists).
+/// - v3: adds a trailing CRC-32 over the body (corruption detection).
+///
+/// Older versions still load, so existing snapshots keep working.
 pub const MAGIC: &[u8; 4] = b"STRN";
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 
 const TYPE_BYTES: u8 = 0;
 const TYPE_LIST: u8 = 1;
@@ -35,6 +47,15 @@ enum Value {
 struct Entry {
     value: Value,
     expire_at: Option<u64>,
+}
+
+/// State + log behind a single lock, so the log order always matches the order
+/// mutations were applied. Journalling outside the lock would let two threads
+/// interleave and replay into a different state than the one in memory.
+struct Inner {
+    map: HashMap<String, Entry>,
+    aof: Option<Aof>,
+    closed: bool,
 }
 
 fn now_ms() -> u64 {
@@ -62,17 +83,269 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// In-memory key-value store. `parking_lot::Mutex` gives fast, poison-free locking.
-#[derive(Default)]
+/// What replaying a log on startup found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Recovery {
+    /// Records successfully applied.
+    pub applied: u32,
+    /// True when a torn/corrupt tail was found and dropped (a crash mid-append).
+    pub truncated: bool,
+}
+
+// ── Mutations, applied to the map only (no journalling) ───────────────────
+// Used by the public API *and* by replay, so a replayed log reproduces exactly
+// the same state — there is only one implementation of each operation.
+
+fn apply_set(
+    map: &mut HashMap<String, Entry>,
+    key: String,
+    value: Vec<u8>,
+    expire_at: Option<u64>,
+) {
+    map.insert(
+        key,
+        Entry {
+            value: Value::Bytes(value),
+            expire_at,
+        },
+    );
+}
+
+fn apply_del(map: &mut HashMap<String, Entry>, key: &str) -> bool {
+    map.remove(key).is_some()
+}
+
+fn apply_expire(map: &mut HashMap<String, Entry>, key: &str, expire_at: u64) -> bool {
+    match map.get_mut(key) {
+        Some(e) => {
+            e.expire_at = Some(expire_at);
+            true
+        }
+        None => false,
+    }
+}
+
+fn apply_persist(map: &mut HashMap<String, Entry>, key: &str) -> bool {
+    match map.get_mut(key) {
+        Some(e) => {
+            e.expire_at = None;
+            true
+        }
+        None => false,
+    }
+}
+
+fn apply_push(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    value: Vec<u8>,
+    front: bool,
+) -> Result<u32, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::List(l) => {
+                if front {
+                    l.push_front(value);
+                } else {
+                    l.push_back(value);
+                }
+                Ok(l.len() as u32)
+            }
+            Value::Bytes(_) => Err(WrongType),
+        },
+        None => {
+            let mut l = VecDeque::new();
+            l.push_back(value);
+            map.insert(
+                key.to_string(),
+                Entry {
+                    value: Value::List(l),
+                    expire_at: None,
+                },
+            );
+            Ok(1)
+        }
+    }
+}
+
+fn apply_pop(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    front: bool,
+) -> Result<Option<Vec<u8>>, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::List(l) => {
+                let v = if front { l.pop_front() } else { l.pop_back() };
+                if l.is_empty() {
+                    map.remove(key); // an empty list key is deleted (Redis-like)
+                }
+                Ok(v)
+            }
+            Value::Bytes(_) => Err(WrongType),
+        },
+        None => Ok(None),
+    }
+}
+
+/// In-memory store. `parking_lot::Mutex` gives fast, poison-free locking.
 pub struct Store {
-    inner: Mutex<HashMap<String, Entry>>,
+    inner: Mutex<Inner>,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Store {
     pub fn new() -> Self {
         Store {
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                aof: None,
+                closed: false,
+            }),
         }
+    }
+
+    /// Open a store backed by an append-only log at `path`, replaying it first.
+    ///
+    /// A torn tail (the process died mid-append) is dropped and the file
+    /// truncated to the last intact record — reported via [`Recovery`], not an
+    /// error, because it is the expected outcome of a crash.
+    pub fn with_aof(path: &Path, fsync: bool) -> std::io::Result<(Self, Recovery)> {
+        let (records, damaged_at) = aof::read_records(path)?;
+        let mut map = HashMap::new();
+        let mut applied = 0u32;
+
+        for payload in &records {
+            if Self::replay_one(&mut map, payload) {
+                applied += 1;
+            }
+        }
+        if let Some(offset) = damaged_at {
+            aof::truncate_at(path, offset)?;
+        }
+
+        let store = Store {
+            inner: Mutex::new(Inner {
+                map,
+                aof: Some(Aof::open(path, fsync)?),
+                closed: false,
+            }),
+        };
+        Ok((
+            store,
+            Recovery {
+                applied,
+                truncated: damaged_at.is_some(),
+            },
+        ))
+    }
+
+    /// Apply one decoded log record. Returns false if the record is unreadable.
+    fn replay_one(map: &mut HashMap<String, Entry>, payload: &[u8]) -> bool {
+        if payload.is_empty() {
+            return false;
+        }
+        let op = payload[0];
+        let mut c = aof::Cursor::new(payload);
+        match op {
+            aof::OP_SET => match (c.string(), c.u64(), c.bytes()) {
+                (Some(k), Some(exp), Some(v)) => {
+                    apply_set(map, k, v.to_vec(), if exp == 0 { None } else { Some(exp) });
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_DEL => match c.string() {
+                Some(k) => {
+                    apply_del(map, &k);
+                    true
+                }
+                None => false,
+            },
+            aof::OP_EXPIRE => match (c.string(), c.u64()) {
+                (Some(k), Some(exp)) => {
+                    apply_expire(map, &k, exp);
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_PERSIST => match c.string() {
+                Some(k) => {
+                    apply_persist(map, &k);
+                    true
+                }
+                None => false,
+            },
+            aof::OP_CLEAR => {
+                map.clear();
+                true
+            }
+            aof::OP_PUSH_FRONT | aof::OP_PUSH_BACK => match (c.string(), c.bytes()) {
+                (Some(k), Some(v)) => {
+                    let _ = apply_push(map, &k, v.to_vec(), op == aof::OP_PUSH_FRONT);
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_POP_FRONT | aof::OP_POP_BACK => match c.string() {
+                Some(k) => {
+                    let _ = apply_pop(map, &k, op == aof::OP_POP_FRONT);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Journal a record if a log is attached. Errors are surfaced: a write that
+    /// isn't durable must not be reported as successful.
+    fn journal(inner: &mut Inner, payload: Vec<u8>) -> std::io::Result<()> {
+        match inner.aof.as_mut() {
+            Some(a) => a.append(&payload),
+            None => Ok(()),
+        }
+    }
+
+    /// Reject mutations on a closed store. Silently accepting them would drop
+    /// writes that were never journalled — data loss with no error.
+    fn ensure_open(inner: &Inner) -> std::io::Result<()> {
+        if inner.closed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "store is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Flush the log and release its file handle. Idempotent.
+    ///
+    /// Releasing the handle matters beyond tidiness: on Windows a file with an
+    /// open handle cannot be deleted or replaced, so without this the log stays
+    /// locked for the life of the process. After closing, mutations fail rather
+    /// than silently skipping the journal; reads still work from memory.
+    pub fn close(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.lock();
+        inner.closed = true;
+        match inner.aof.as_mut() {
+            Some(a) => {
+                let r = a.close();
+                inner.aof = None;
+                r
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Whether `close` has been called.
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().closed
     }
 
     fn expire_at_from_ttl(ttl_ms: Option<i64>) -> Option<u64> {
@@ -85,24 +358,22 @@ impl Store {
     // ── Bytes (KV) ────────────────────────────────────────────────────────
 
     /// Store raw bytes. Replaces any existing value (including a list), like SET.
-    pub fn set(&self, key: String, value: Vec<u8>, ttl_ms: Option<i64>) {
+    pub fn set(&self, key: String, value: Vec<u8>, ttl_ms: Option<i64>) -> std::io::Result<()> {
         let expire_at = Self::expire_at_from_ttl(ttl_ms);
-        self.inner.lock().insert(
-            key,
-            Entry {
-                value: Value::Bytes(value),
-                expire_at,
-            },
-        );
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        let rec = aof::rec_set(&key, &value, expire_at);
+        apply_set(&mut inner.map, key, value, expire_at);
+        Self::journal(&mut inner, rec)
     }
 
     /// Return the bytes for `key`. `WrongType` if it holds a list.
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, WrongType> {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        match map.get(key) {
+        let mut inner = self.inner.lock();
+        match inner.map.get(key) {
             Some(e) if is_expired(e, now) => {
-                map.remove(key);
+                inner.map.remove(key);
                 Ok(None)
             }
             Some(e) => match &e.value {
@@ -115,16 +386,22 @@ impl Store {
 
     // ── Key management (type-agnostic) ────────────────────────────────────
 
-    pub fn del(&self, key: &str) -> bool {
-        self.inner.lock().remove(key).is_some()
+    pub fn del(&self, key: &str) -> std::io::Result<bool> {
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        let existed = apply_del(&mut inner.map, key);
+        if existed {
+            Self::journal(&mut inner, aof::rec_key_only(aof::OP_DEL, key))?;
+        }
+        Ok(existed)
     }
 
     pub fn exists(&self, key: &str) -> bool {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        match map.get(key) {
+        let mut inner = self.inner.lock();
+        match inner.map.get(key) {
             Some(e) if is_expired(e, now) => {
-                map.remove(key);
+                inner.map.remove(key);
                 false
             }
             Some(_) => true,
@@ -132,34 +409,33 @@ impl Store {
         }
     }
 
-    pub fn expire(&self, key: &str, ttl_ms: i64) -> bool {
-        let mut map = self.inner.lock();
-        match map.get_mut(key) {
-            Some(e) => {
-                e.expire_at = Some(now_ms() + ttl_ms.max(0) as u64);
-                true
-            }
-            None => false,
+    pub fn expire(&self, key: &str, ttl_ms: i64) -> std::io::Result<bool> {
+        let expire_at = now_ms() + ttl_ms.max(0) as u64;
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        let ok = apply_expire(&mut inner.map, key, expire_at);
+        if ok {
+            Self::journal(&mut inner, aof::rec_expire(key, expire_at))?;
         }
+        Ok(ok)
     }
 
-    pub fn persist(&self, key: &str) -> bool {
-        let mut map = self.inner.lock();
-        match map.get_mut(key) {
-            Some(e) => {
-                e.expire_at = None;
-                true
-            }
-            None => false,
+    pub fn persist(&self, key: &str) -> std::io::Result<bool> {
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        let ok = apply_persist(&mut inner.map, key);
+        if ok {
+            Self::journal(&mut inner, aof::rec_key_only(aof::OP_PERSIST, key))?;
         }
+        Ok(ok)
     }
 
     pub fn ttl(&self, key: &str) -> i64 {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        match map.get(key) {
+        let mut inner = self.inner.lock();
+        match inner.map.get(key) {
             Some(e) if is_expired(e, now) => {
-                map.remove(key);
+                inner.map.remove(key);
                 -2
             }
             Some(e) => match e.expire_at {
@@ -174,6 +450,7 @@ impl Store {
         let now = now_ms();
         self.inner
             .lock()
+            .map
             .iter()
             .filter(|(_, e)| !is_expired(e, now))
             .map(|(k, _)| k.clone())
@@ -181,107 +458,111 @@ impl Store {
     }
 
     pub fn size(&self) -> u32 {
-        self.inner.lock().len() as u32
+        self.inner.lock().map.len() as u32
     }
 
-    pub fn clear(&self) {
-        self.inner.lock().clear();
+    pub fn clear(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        inner.map.clear();
+        Self::journal(&mut inner, aof::rec_clear())
     }
 
     pub fn sweep(&self) -> u32 {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        let before = map.len();
-        map.retain(|_, e| !is_expired(e, now));
-        (before - map.len()) as u32
+        let mut inner = self.inner.lock();
+        let before = inner.map.len();
+        inner.map.retain(|_, e| !is_expired(e, now));
+        (before - inner.map.len()) as u32
     }
 
     // ── List ──────────────────────────────────────────────────────────────
 
-    fn push(&self, key: &str, value: Vec<u8>, front: bool) -> Result<u32, WrongType> {
+    fn push(&self, key: &str, value: Vec<u8>, front: bool) -> Result<u32, ListError> {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
-            map.remove(key);
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        if inner
+            .map
+            .get(key)
+            .map(|e| is_expired(e, now))
+            .unwrap_or(false)
+        {
+            inner.map.remove(key);
         }
-        match map.get_mut(key) {
-            Some(e) => match &mut e.value {
-                Value::List(l) => {
-                    if front {
-                        l.push_front(value);
-                    } else {
-                        l.push_back(value);
-                    }
-                    Ok(l.len() as u32)
-                }
-                Value::Bytes(_) => Err(WrongType),
+        let rec = aof::rec_push(
+            if front {
+                aof::OP_PUSH_FRONT
+            } else {
+                aof::OP_PUSH_BACK
             },
-            None => {
-                let mut l = VecDeque::new();
-                l.push_back(value);
-                map.insert(
-                    key.to_string(),
-                    Entry {
-                        value: Value::List(l),
-                        expire_at: None,
-                    },
-                );
-                Ok(1)
-            }
-        }
+            key,
+            &value,
+        );
+        let len = apply_push(&mut inner.map, key, value, front)?;
+        Self::journal(&mut inner, rec)?;
+        Ok(len)
     }
 
     /// Prepend to a list (creating it if missing). Returns the new length.
-    pub fn push_front(&self, key: &str, value: Vec<u8>) -> Result<u32, WrongType> {
+    pub fn push_front(&self, key: &str, value: Vec<u8>) -> Result<u32, ListError> {
         self.push(key, value, true)
     }
 
     /// Append to a list (creating it if missing). Returns the new length.
-    pub fn push_back(&self, key: &str, value: Vec<u8>) -> Result<u32, WrongType> {
+    pub fn push_back(&self, key: &str, value: Vec<u8>) -> Result<u32, ListError> {
         self.push(key, value, false)
     }
 
-    fn pop(&self, key: &str, front: bool) -> Result<Option<Vec<u8>>, WrongType> {
+    fn pop(&self, key: &str, front: bool) -> Result<Option<Vec<u8>>, ListError> {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
-            map.remove(key);
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        if inner
+            .map
+            .get(key)
+            .map(|e| is_expired(e, now))
+            .unwrap_or(false)
+        {
+            inner.map.remove(key);
             return Ok(None);
         }
-        match map.get_mut(key) {
-            Some(e) => match &mut e.value {
-                Value::List(l) => {
-                    let v = if front { l.pop_front() } else { l.pop_back() };
-                    if l.is_empty() {
-                        map.remove(key); // an empty list key is deleted (Redis-like)
-                    }
-                    Ok(v)
-                }
-                Value::Bytes(_) => Err(WrongType),
-            },
-            None => Ok(None),
+        let out = apply_pop(&mut inner.map, key, front)?;
+        if out.is_some() {
+            let op = if front {
+                aof::OP_POP_FRONT
+            } else {
+                aof::OP_POP_BACK
+            };
+            Self::journal(&mut inner, aof::rec_key_only(op, key))?;
         }
+        Ok(out)
     }
 
     /// Remove and return the first element, or `None` if empty/missing.
-    pub fn pop_front(&self, key: &str) -> Result<Option<Vec<u8>>, WrongType> {
+    pub fn pop_front(&self, key: &str) -> Result<Option<Vec<u8>>, ListError> {
         self.pop(key, true)
     }
 
     /// Remove and return the last element, or `None` if empty/missing.
-    pub fn pop_back(&self, key: &str) -> Result<Option<Vec<u8>>, WrongType> {
+    pub fn pop_back(&self, key: &str) -> Result<Option<Vec<u8>>, ListError> {
         self.pop(key, false)
     }
 
     /// List length (0 if missing). `WrongType` if the key holds bytes.
     pub fn llen(&self, key: &str) -> Result<u32, WrongType> {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
-            map.remove(key);
+        let mut inner = self.inner.lock();
+        if inner
+            .map
+            .get(key)
+            .map(|e| is_expired(e, now))
+            .unwrap_or(false)
+        {
+            inner.map.remove(key);
             return Ok(0);
         }
-        match map.get(key) {
+        match inner.map.get(key) {
             Some(e) => match &e.value {
                 Value::List(l) => Ok(l.len() as u32),
                 Value::Bytes(_) => Err(WrongType),
@@ -294,12 +575,17 @@ impl Store {
     /// indices count from the end; out-of-range is clamped).
     pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<Vec<u8>>, WrongType> {
         let now = now_ms();
-        let mut map = self.inner.lock();
-        if map.get(key).map(|e| is_expired(e, now)).unwrap_or(false) {
-            map.remove(key);
+        let mut inner = self.inner.lock();
+        if inner
+            .map
+            .get(key)
+            .map(|e| is_expired(e, now))
+            .unwrap_or(false)
+        {
+            inner.map.remove(key);
             return Ok(Vec::new());
         }
-        match map.get(key) {
+        match inner.map.get(key) {
             Some(e) => match &e.value {
                 Value::List(l) => {
                     let len = l.len() as i64;
@@ -326,17 +612,77 @@ impl Store {
         }
     }
 
+    // ── AOF maintenance ───────────────────────────────────────────────────
+
+    /// Whether this store journals to a log.
+    pub fn has_aof(&self) -> bool {
+        self.inner.lock().aof.is_some()
+    }
+
+    /// Current log size in bytes (0 without a log).
+    pub fn aof_size(&self) -> u64 {
+        self.inner
+            .lock()
+            .aof
+            .as_ref()
+            .map(|a| a.size())
+            .unwrap_or(0)
+    }
+
+    /// Rewrite the log as the shortest sequence that reproduces current state.
+    ///
+    /// A long-running queue appends forever (`push`, `pop`, `push`…) even when
+    /// it holds two items; compaction collapses that history into the state
+    /// itself. Written to a temp file and renamed, so a crash mid-compaction
+    /// leaves the previous log intact.
+    pub fn compact(&self) -> std::io::Result<u64> {
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        if inner.aof.is_none() {
+            return Ok(0);
+        }
+        let now = now_ms();
+        let mut records: Vec<Vec<u8>> = Vec::new();
+        for (k, e) in inner.map.iter() {
+            if is_expired(e, now) {
+                continue; // don't journal what's already dead
+            }
+            match &e.value {
+                Value::Bytes(b) => records.push(aof::rec_set(k, b, e.expire_at)),
+                Value::List(l) => {
+                    for elem in l {
+                        records.push(aof::rec_push(aof::OP_PUSH_BACK, k, elem));
+                    }
+                    // push doesn't carry a TTL, so restore it explicitly.
+                    if let Some(exp) = e.expire_at {
+                        records.push(aof::rec_expire(k, exp));
+                    }
+                }
+            }
+        }
+        let aof = inner.aof.as_mut().unwrap();
+        aof.rewrite(&records)?;
+        Ok(aof.size())
+    }
+
     // ── Snapshot ──────────────────────────────────────────────────────────
 
     /// Serialize the whole store to a self-describing binary snapshot.
+    ///
+    /// Layout (little-endian):
+    ///   "STRN" | version:u8 | flags:u8 | count:u32 | entries | crc32:u32
+    ///   per entry: key_len:u32 | key | expire_at:u64 (0 = none) | type:u8 | body
+    ///     type 0 (bytes): val_len:u32 | val
+    ///     type 1 (list):  elem_count:u32 | (elem_len:u32 | elem)*
+    /// The trailing CRC covers everything before it (v3+).
     pub fn dump_bytes(&self) -> Vec<u8> {
-        let map = self.inner.lock();
+        let inner = self.inner.lock();
         let mut buf = Vec::new();
         buf.extend_from_slice(MAGIC);
         buf.push(VERSION);
         buf.push(0u8); // flags (reserved)
-        buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
-        for (k, e) in map.iter() {
+        buf.extend_from_slice(&(inner.map.len() as u32).to_le_bytes());
+        for (k, e) in inner.map.iter() {
             let kb = k.as_bytes();
             buf.extend_from_slice(&(kb.len() as u32).to_le_bytes());
             buf.extend_from_slice(kb);
@@ -357,10 +703,15 @@ impl Store {
                 }
             }
         }
+        let checksum = crc32(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
         buf
     }
 
-    /// Load a snapshot, replacing all current state. Accepts version 1 and 2.
+    /// Load a snapshot, replacing all current state. Accepts versions 1–3.
+    ///
+    /// For v3 the trailing CRC is verified first, so a corrupted file is
+    /// rejected instead of silently loading garbage.
     pub fn load_bytes(&self, data: &[u8]) -> Result<(), SnapshotError> {
         let bad = |m: &str| SnapshotError(m.to_string());
         if data.len() < 10 {
@@ -370,13 +721,28 @@ impl Store {
             return Err(bad("bad magic: not a Strenor snapshot"));
         }
         let version = data[4];
-        if version != 1 && version != 2 {
+        if version == 0 || version > VERSION {
             return Err(bad("unsupported snapshot version"));
         }
-        let mut p = 6usize; // magic(4) + version(1) + flags(1)
 
+        // v3+ carries a trailing CRC over the preceding bytes.
+        let body = if version >= 3 {
+            if data.len() < 14 {
+                return Err(bad("snapshot too small"));
+            }
+            let split = data.len() - 4;
+            let want = u32::from_le_bytes(data[split..].try_into().unwrap());
+            if crc32(&data[..split]) != want {
+                return Err(bad("checksum mismatch: snapshot is corrupted"));
+            }
+            &data[..split]
+        } else {
+            data
+        };
+
+        let mut p = 6usize; // magic(4) + version(1) + flags(1)
         let read = |p: &mut usize, n: usize| -> Result<usize, SnapshotError> {
-            if *p + n > data.len() {
+            if *p + n > body.len() {
                 return Err(SnapshotError("snapshot truncated".into()));
             }
             let start = *p;
@@ -389,44 +755,44 @@ impl Store {
             |data: &[u8], at: usize| u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
 
         let at = read(&mut p, 4)?;
-        let count = u32_at(data, at) as usize;
+        let count = u32_at(body, at) as usize;
 
         let mut next = HashMap::with_capacity(count);
         for _ in 0..count {
             let at = read(&mut p, 4)?;
-            let kl = u32_at(data, at) as usize;
+            let kl = u32_at(body, at) as usize;
             let at = read(&mut p, kl)?;
-            let key = String::from_utf8(data[at..at + kl].to_vec())
+            let key = String::from_utf8(body[at..at + kl].to_vec())
                 .map_err(|_| bad("invalid utf8 key"))?;
 
             let at = read(&mut p, 8)?;
-            let exp = u64_at(data, at);
+            let exp = u64_at(body, at);
             let expire_at = if exp == 0 { None } else { Some(exp) };
 
-            // Version 1: bytes only, no type byte. Version 2: type byte first.
+            // Version 1: bytes only, no type byte. Version 2+: type byte first.
             let kind = if version == 1 {
                 TYPE_BYTES
             } else {
                 let at = read(&mut p, 1)?;
-                data[at]
+                body[at]
             };
 
             let value = match kind {
                 TYPE_BYTES => {
                     let at = read(&mut p, 4)?;
-                    let vl = u32_at(data, at) as usize;
+                    let vl = u32_at(body, at) as usize;
                     let at = read(&mut p, vl)?;
-                    Value::Bytes(data[at..at + vl].to_vec())
+                    Value::Bytes(body[at..at + vl].to_vec())
                 }
                 TYPE_LIST => {
                     let at = read(&mut p, 4)?;
-                    let n = u32_at(data, at) as usize;
+                    let n = u32_at(body, at) as usize;
                     let mut l = VecDeque::with_capacity(n);
                     for _ in 0..n {
                         let at = read(&mut p, 4)?;
-                        let el = u32_at(data, at) as usize;
+                        let el = u32_at(body, at) as usize;
                         let at = read(&mut p, el)?;
-                        l.push_back(data[at..at + el].to_vec());
+                        l.push_back(body[at..at + el].to_vec());
                     }
                     Value::List(l)
                 }
@@ -436,70 +802,127 @@ impl Store {
             next.insert(key, Entry { value, expire_at });
         }
 
-        *self.inner.lock() = next;
+        self.inner.lock().map = next;
         Ok(())
+    }
+}
+
+/// A list operation can fail on the structure type *or* on journalling.
+#[derive(Debug)]
+pub enum ListError {
+    WrongType,
+    Io(std::io::Error),
+}
+
+impl From<WrongType> for ListError {
+    fn from(_: WrongType) -> Self {
+        ListError::WrongType
+    }
+}
+
+impl From<std::io::Error> for ListError {
+    fn from(e: std::io::Error) -> Self {
+        ListError::Io(e)
+    }
+}
+
+impl std::fmt::Display for ListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListError::WrongType => write!(f, "WRONGTYPE"),
+            ListError::Io(e) => write!(f, "{e}"),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::path::PathBuf;
 
     fn b(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
     }
 
+    /// Unique temp path per test, cleaned on drop.
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new(name: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            let uniq = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            p.push(format!("strenor-{name}-{uniq}.aof"));
+            Tmp(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     #[test]
     fn set_get_del() {
         let s = Store::new();
-        s.set("a".into(), vec![1, 2, 3], None);
+        s.set("a".into(), vec![1, 2, 3], None).unwrap();
         assert_eq!(s.get("a"), Ok(Some(vec![1, 2, 3])));
         assert!(s.exists("a"));
-        assert!(s.del("a"));
-        assert!(!s.del("a"));
+        assert!(s.del("a").unwrap());
+        assert!(!s.del("a").unwrap());
         assert_eq!(s.get("a"), Ok(None));
     }
 
     #[test]
     fn ttl_semantics() {
         let s = Store::new();
-        s.set("k".into(), vec![0], None);
+        s.set("k".into(), vec![0], None).unwrap();
         assert_eq!(s.ttl("k"), -1);
         assert_eq!(s.ttl("ghost"), -2);
-        assert!(s.expire("k", 10_000));
+        assert!(s.expire("k", 10_000).unwrap());
         assert!(s.ttl("k") > 0);
-        assert!(s.persist("k"));
+        assert!(s.persist("k").unwrap());
         assert_eq!(s.ttl("k"), -1);
-        assert!(!s.expire("missing", 1000));
+        assert!(!s.expire("missing", 1000).unwrap());
+        assert!(!s.persist("missing").unwrap());
     }
 
     #[test]
     fn expiration_and_sweep() {
         let s = Store::new();
-        s.set("x".into(), vec![0], Some(1));
-        s.set("y".into(), vec![0], None);
+        s.set("x".into(), vec![0], Some(1)).unwrap();
+        s.set("y".into(), vec![0], None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert_eq!(s.get("x"), Ok(None));
-        s.set("z".into(), vec![0], Some(1));
+        s.set("z".into(), vec![0], Some(1)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert_eq!(s.sweep(), 1);
         assert!(s.exists("y"));
+        assert_eq!(s.size(), 1);
+        s.clear().unwrap();
+        assert_eq!(s.size(), 0);
+        assert!(s.keys().is_empty());
     }
 
     #[test]
     fn list_fifo_and_lifo() {
         let s = Store::new();
-        assert_eq!(s.push_back("q", b("a")), Ok(1));
-        assert_eq!(s.push_back("q", b("b")), Ok(2));
-        assert_eq!(s.pop_front("q"), Ok(Some(b("a"))));
-        assert_eq!(s.pop_front("q"), Ok(Some(b("b"))));
-        assert_eq!(s.pop_front("q"), Ok(None));
+        assert_eq!(s.push_back("q", b("a")).unwrap(), 1);
+        assert_eq!(s.push_back("q", b("b")).unwrap(), 2);
+        assert_eq!(s.pop_front("q").unwrap(), Some(b("a")));
+        assert_eq!(s.pop_front("q").unwrap(), Some(b("b")));
+        assert_eq!(s.pop_front("q").unwrap(), None);
         assert!(!s.exists("q"));
 
-        s.push_back("s", b("1")).unwrap();
-        s.push_back("s", b("2")).unwrap();
-        assert_eq!(s.pop_back("s"), Ok(Some(b("2"))));
-        assert_eq!(s.pop_back("s"), Ok(Some(b("1"))));
+        s.push_front("s", b("1")).unwrap();
+        s.push_front("s", b("2")).unwrap();
+        assert_eq!(s.pop_back("s").unwrap(), Some(b("1")));
+        assert_eq!(s.pop_back("s").unwrap(), Some(b("2")));
     }
 
     #[test]
@@ -523,23 +946,26 @@ mod tests {
     #[test]
     fn wrong_type_errors() {
         let s = Store::new();
-        s.set("a".into(), b("hola"), None);
-        assert_eq!(s.push_back("a", b("x")), Err(WrongType));
-        assert_eq!(s.pop_front("a"), Err(WrongType));
+        s.set("a".into(), b("hola"), None).unwrap();
+        assert!(matches!(
+            s.push_back("a", b("x")),
+            Err(ListError::WrongType)
+        ));
+        assert!(matches!(s.pop_front("a"), Err(ListError::WrongType)));
         assert_eq!(s.llen("a"), Err(WrongType));
         assert_eq!(s.lrange("a", 0, -1), Err(WrongType));
 
         s.push_back("l", b("x")).unwrap();
         assert_eq!(s.get("l"), Err(WrongType));
-        s.set("l".into(), b("now bytes"), None);
+        s.set("l".into(), b("now bytes"), None).unwrap();
         assert_eq!(s.get("l"), Ok(Some(b("now bytes"))));
     }
 
     #[test]
     fn snapshot_roundtrip_bytes_and_lists() {
         let s = Store::new();
-        s.set("name".into(), b("strenor"), None);
-        s.set("ttl".into(), vec![1], Some(60_000));
+        s.set("name".into(), b("strenor"), None).unwrap();
+        s.set("ttl".into(), vec![1], Some(60_000)).unwrap();
         s.push_back("jobs", b("j1")).unwrap();
         s.push_back("jobs", b("j2")).unwrap();
         let bytes = s.dump_bytes();
@@ -552,9 +978,178 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_rejects_garbage() {
+    fn snapshot_rejects_garbage_and_corruption() {
         let s = Store::new();
         assert!(s.load_bytes(b"not a snapshot").is_err());
-        assert!(s.load_bytes(b"STRN\x09\x00\x00\x00\x00\x00").is_err());
+        assert!(s.load_bytes(b"STRN\x09\x00\x00\x00\x00\x00").is_err()); // bad version
+
+        // Flip a byte in the middle: the trailing CRC must catch it.
+        s.set("k".into(), b("value"), None).unwrap();
+        let mut bytes = s.dump_bytes();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xff;
+        let fresh = Store::new();
+        let err = fresh.load_bytes(&bytes).unwrap_err();
+        assert!(err.0.contains("corrupted"), "got: {}", err.0);
+    }
+
+    #[test]
+    fn aof_persists_and_replays() {
+        let tmp = Tmp::new("replay");
+        {
+            let (s, rec) = Store::with_aof(tmp.path(), false).unwrap();
+            assert_eq!(rec, Recovery::default()); // fresh file: nothing to apply
+            s.set("user".into(), b("brashkie"), None).unwrap();
+            s.set("gone".into(), b("x"), None).unwrap();
+            s.del("gone").unwrap();
+            s.push_back("jobs", b("j1")).unwrap();
+            s.push_back("jobs", b("j2")).unwrap();
+            s.pop_front("jobs").unwrap();
+            s.expire("user", 60_000).unwrap();
+        } // dropped: simulates the process going away
+
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec.truncated);
+        assert_eq!(rec.applied, 7);
+        assert_eq!(s2.get("user"), Ok(Some(b("brashkie"))));
+        assert_eq!(s2.get("gone"), Ok(None));
+        assert_eq!(s2.lrange("jobs", 0, -1), Ok(vec![b("j2")]));
+        assert!(s2.ttl("user") > 0);
+    }
+
+    #[test]
+    fn aof_recovers_from_a_torn_tail() {
+        let tmp = Tmp::new("torn");
+        {
+            let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+            s.set("good".into(), b("1"), None).unwrap();
+            s.set("also-good".into(), b("2"), None).unwrap();
+        }
+        // Simulate a crash mid-append: garbage bytes at the end.
+        {
+            use std::io::Write;
+            let mut f = OpenOptions::new().append(true).open(tmp.path()).unwrap();
+            f.write_all(&[0xff, 0x00, 0x00, 0x00, 0xde, 0xad]).unwrap();
+        }
+
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(rec.truncated, "a torn tail must be reported");
+        assert_eq!(rec.applied, 2); // both intact records survived
+        assert_eq!(s2.get("good"), Ok(Some(b("1"))));
+        assert_eq!(s2.get("also-good"), Ok(Some(b("2"))));
+
+        // The file was truncated, so reopening is now clean.
+        drop(s2);
+        let (_, rec2) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec2.truncated);
+        assert_eq!(rec2.applied, 2);
+    }
+
+    #[test]
+    fn aof_compaction_shrinks_and_preserves_state() {
+        let tmp = Tmp::new("compact");
+        let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+        // Churn: a queue that pushes and pops forever grows the log unboundedly.
+        for i in 0..200 {
+            s.push_back("q", b(&format!("job-{i}"))).unwrap();
+            s.pop_front("q").unwrap();
+        }
+        s.set("keep".into(), b("value"), None).unwrap();
+        s.push_back("q", b("last")).unwrap();
+        s.push_back("ttl-list", b("e")).unwrap();
+        s.expire("ttl-list", 60_000).unwrap();
+
+        let before = s.aof_size();
+        let after = s.compact().unwrap();
+        assert!(
+            after < before,
+            "compaction must shrink: {after} !< {before}"
+        );
+
+        // State survives a reopen from the compacted log.
+        drop(s);
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec.truncated);
+        assert_eq!(s2.get("keep"), Ok(Some(b("value"))));
+        assert_eq!(s2.lrange("q", 0, -1), Ok(vec![b("last")]));
+        assert!(s2.ttl("ttl-list") > 0); // list TTL restored
+    }
+
+    #[test]
+    fn aof_skips_expired_entries_on_compaction() {
+        let tmp = Tmp::new("expired");
+        let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+        s.set("dead".into(), b("x"), Some(1)).unwrap();
+        s.set("alive".into(), b("y"), None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        s.compact().unwrap();
+        drop(s);
+
+        let (s2, _) = Store::with_aof(tmp.path(), false).unwrap();
+        assert_eq!(s2.get("alive"), Ok(Some(b("y"))));
+        assert_eq!(s2.get("dead"), Ok(None));
+        assert_eq!(s2.size(), 1); // the dead key was never journalled
+    }
+
+    #[test]
+    fn store_without_aof_reports_no_log() {
+        let s = Store::new();
+        assert!(!s.has_aof());
+        assert_eq!(s.aof_size(), 0);
+        assert_eq!(s.compact().unwrap(), 0); // no-op, not an error
+    }
+
+    #[test]
+    fn close_releases_the_log_and_is_idempotent() {
+        let tmp = Tmp::new("close");
+        let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+        s.set("k".into(), b("v"), None).unwrap();
+        assert!(s.has_aof());
+
+        s.close().unwrap();
+        assert!(s.is_closed());
+        assert!(!s.has_aof()); // handle released
+        s.close().unwrap(); // idempotent
+
+        // Reads still work from memory...
+        assert_eq!(s.get("k"), Ok(Some(b("v"))));
+        // ...but writes must fail loudly instead of skipping the journal.
+        assert!(s.set("k2".into(), b("v"), None).is_err());
+        assert!(s.del("k").is_err());
+        assert!(s.clear().is_err());
+        assert!(s.expire("k", 100).is_err());
+        assert!(s.persist("k").is_err());
+        assert!(matches!(s.push_back("l", b("x")), Err(ListError::Io(_))));
+        assert!(matches!(s.pop_front("l"), Err(ListError::Io(_))));
+        assert!(s.compact().is_err());
+    }
+
+    #[test]
+    fn closed_log_can_be_deleted_and_reopened() {
+        // The exact Windows failure: a still-open handle leaves the file in a
+        // "delete pending" state, and the next open fails with Access Denied.
+        let tmp = Tmp::new("reopen");
+        {
+            let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+            s.set("a".into(), b("1"), None).unwrap();
+            s.close().unwrap();
+        }
+        std::fs::remove_file(tmp.path()).unwrap(); // must succeed: no open handle
+
+        let (fresh, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert_eq!(rec.applied, 0); // brand-new log
+        fresh.set("b".into(), b("2"), None).unwrap();
+        assert_eq!(fresh.get("b"), Ok(Some(b("2"))));
+        fresh.close().unwrap();
+    }
+
+    #[test]
+    fn memory_only_store_closes_cleanly() {
+        let s = Store::new();
+        s.set("k".into(), b("v"), None).unwrap();
+        s.close().unwrap();
+        assert!(s.is_closed());
+        assert_eq!(s.get("k"), Ok(Some(b("v"))));
+        assert!(s.set("x".into(), b("y"), None).is_err());
     }
 }

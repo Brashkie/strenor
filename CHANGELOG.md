@@ -6,6 +6,41 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-17
+
+Persistence: Strenor is no longer "memory with a dump".
+
+### Added
+
+- **Append-only log (AOF)** via the `aof` option: every mutation is journalled
+  and replayed on open, so state survives a restart or a crash. Optional
+  `fsync` for power-loss durability.
+- **Crash recovery**: a torn tail (the process died mid-append) is dropped and
+  the log truncated to the last intact record, reported via `recovery`
+  (`{ applied, truncated }`) instead of failing.
+- **Compaction**: `compact()` rewrites the log to the shortest sequence that
+  reproduces current state; `aofSize()` and `durable` to drive it.
+- **CRC-32 checksums** on every log record and on snapshots (format v3), with
+  corruption detection — a damaged snapshot is rejected, not silently loaded.
+
+### Changed
+
+- Snapshots are now written **atomically** (temp file + rename). Previously a
+  crash mid-`dump` could truncate the file and lose the data.
+- Snapshot format bumped to v3; v1 and v2 snapshots still load.
+
+### Fixed
+
+- Write errors are no longer swallowed: a mutation that could not be journalled
+  now throws instead of reporting success.
+- `close()` now releases the log's file handle instead of only stopping the
+  sweeper. The handle is a real OS resource: on Windows the log file could not
+  be deleted, moved, or reopened for the life of the process (`Access denied`,
+  os error 5). Closing is idempotent; after it, reads still work from memory
+  while mutations throw, so a write is never dropped from the journal unnoticed.
+- Compaction releases its handle before replacing the log, which Windows
+  requires in order to rename over an existing file.
+
 ## [0.1.0] - 2026-07-11
 
 First stable release — out of alpha. The KV + list + counter API is stable for
@@ -58,7 +93,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Brashkie/strenor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Brashkie/strenor/compare/v0.1.0-alpha.0...v0.1.0
 [0.1.0-alpha.0]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.1...v0.1.0-alpha.0
 [0.0.1-alpha.1]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.0...v0.0.1-alpha.1

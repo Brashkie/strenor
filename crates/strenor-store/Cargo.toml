@@ -1,6 +1,6 @@
 [package]
 name = "strenor-store"
-description = "Pure key-value core for Strenor (in-memory byte store, TTL, snapshot)"
+description = "Pure key-value core for Strenor (in-memory byte store, TTL, AOF, snapshot)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

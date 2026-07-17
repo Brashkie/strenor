@@ -1,4 +1,4 @@
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Import the compiled CJS output so the native loader (require/__dirname) works.
@@ -291,6 +291,102 @@ describe('Strenor', () => {
 
       db.enqueue('list', 'x');
       expect(() => db.get('list')).toThrow(/WRONGTYPE/);
+    });
+  });
+
+  describe('durability (append-only log)', () => {
+    const AOF = './test.aof.tmp';
+    const clean = () => {
+      for (const f of [AOF, `${AOF}.compact`]) if (existsSync(f)) rmSync(f, { force: true });
+    };
+    beforeEach(clean);
+    afterAll(clean);
+
+    it('is memory-only by default', () => {
+      expect(db.durable).toBe(false);
+      expect(db.recovery).toBeNull();
+      expect(db.aofSize()).toBe(0);
+      expect(db.compact()).toBe(0); // no-op, not an error
+    });
+
+    it('survives a restart by replaying the log', () => {
+      const first = new Strenor({ aof: AOF });
+      expect(first.durable).toBe(true);
+      expect(first.recovery).toEqual({ applied: 0, truncated: false });
+      first.set('user', { name: 'brashkie' });
+      first.enqueue('jobs', { id: 1 });
+      first.enqueue('jobs', { id: 2 });
+      first.dequeue('jobs');
+      first.incr('hits', 5);
+      first.close();
+
+      // A brand-new instance reading the same log = a process restart.
+      const reopened = new Strenor({ aof: AOF });
+      expect(reopened.recovery?.truncated).toBe(false);
+      expect(reopened.recovery?.applied).toBeGreaterThan(0);
+      expect(reopened.get('user')).toEqual({ name: 'brashkie' });
+      expect(reopened.lrange('jobs', 0, -1)).toEqual([{ id: 2 }]);
+      expect(reopened.get('hits')).toBe(5);
+      reopened.close();
+    });
+
+    it('recovers from a crash that tore the last write', () => {
+      const first = new Strenor({ aof: AOF });
+      first.set('good', 'kept');
+      first.close();
+      // Garbage appended = the process died mid-write.
+      appendFileSync(AOF, Buffer.from([0xff, 0x00, 0x00, 0x00, 0xde, 0xad]));
+
+      const reopened = new Strenor({ aof: AOF });
+      expect(reopened.recovery?.truncated).toBe(true); // reported, not fatal
+      expect(reopened.get('good')).toBe('kept'); // intact data survived
+      reopened.close();
+    });
+
+    it('close() releases the log so the file can be deleted and reopened', () => {
+      // On Windows an open handle leaves the file "delete pending", and the next
+      // open fails with Access Denied. close() must release it for real.
+      const first = new Strenor({ aof: AOF });
+      first.set('a', 1);
+      first.close();
+      expect(() => rmSync(AOF, { force: true })).not.toThrow();
+
+      const fresh = new Strenor({ aof: AOF });
+      expect(fresh.recovery).toEqual({ applied: 0, truncated: false });
+      fresh.set('b', 2);
+      expect(fresh.get('b')).toBe(2);
+      fresh.close();
+    });
+
+    it('reads still work after close but writes throw', () => {
+      const db2 = new Strenor({ aof: AOF });
+      db2.set('kept', 'value');
+      db2.close();
+      expect(db2.get('kept')).toBe('value'); // memory is still readable
+      expect(() => db2.set('x', 1)).toThrow(/closed/); // never silently unjournalled
+      expect(() => db2.enqueue('q', 1)).toThrow(/closed/);
+      expect(() => db2.compact()).toThrow(/closed/);
+      expect(() => db2.close()).not.toThrow(); // idempotent
+    });
+
+    it('compaction shrinks the log and preserves state', () => {
+      const db2 = new Strenor({ aof: AOF });
+      for (let i = 0; i < 100; i++) {
+        db2.enqueue('q', { i });
+        db2.dequeue('q');
+      }
+      db2.set('keep', 'value');
+      db2.enqueue('q', 'last');
+
+      const before = db2.aofSize();
+      const after = db2.compact();
+      expect(after).toBeLessThan(before);
+      db2.close();
+
+      const reopened = new Strenor({ aof: AOF });
+      expect(reopened.get('keep')).toBe('value');
+      expect(reopened.lrange('q', 0, -1)).toEqual(['last']);
+      reopened.close();
     });
   });
 

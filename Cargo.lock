@@ -235,7 +235,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "strenor-node"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "napi",
  "napi-build",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "strenor-store"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "parking_lot",
 ]

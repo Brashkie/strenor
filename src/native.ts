@@ -3,8 +3,15 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** Replay stats returned by the native layer when a log is attached. */
+export interface NativeRecovery {
+  applied: number;
+  truncated: boolean;
+}
+
 /** Typed surface of the compiled Rust addon (no `.d.ts` ships with the .node). */
 export interface NativeStrenorInstance {
+  readonly recovery: NativeRecovery | null;
   set(key: string, value: Buffer, ttlMs?: number): void;
   get(key: string): Buffer | null;
   del(key: string): boolean;
@@ -24,10 +31,14 @@ export interface NativeStrenorInstance {
   popBack(key: string): Buffer | null;
   llen(key: string): number;
   lrange(key: string, start: number, stop: number): Buffer[];
+  close(): void;
+  hasAof(): boolean;
+  aofSize(): number;
+  compact(): number;
 }
 
 export interface NativeBinding {
-  Strenor: new () => NativeStrenorInstance;
+  Strenor: new (aofPath?: string | null, fsync?: boolean | null) => NativeStrenorInstance;
 }
 
 // Self-contained loader using the @napi-rs/cli naming convention, so binaries

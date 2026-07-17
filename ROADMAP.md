@@ -45,15 +45,18 @@ db.push(key, value);      db.pop(key);
 db.incr(key);             db.decr(key);
 ```
 
-### v0.2.x — Persistence · **planned**
+### v0.2.x — Persistence · **shipped**
 
 Turning Strenor from "memory with a dump" into a durable store.
 
-- Append-only log (AOF)
-- Crash recovery
-- Compaction
-- Snapshot versioning
-- Checksums + corruption detection
+Shipped in `0.2.0`:
+
+- Append-only log (AOF) — every mutation journalled, replayed on open.
+- Crash recovery — a torn tail is dropped and reported via `recovery`.
+- Compaction — `compact()` collapses history into current state.
+- Snapshot versioning — v3; v1/v2 snapshots still load.
+- CRC-32 checksums + corruption detection on snapshots and every log record.
+- Atomic snapshot writes (temp file + rename).
 
 ### v0.3.x — Data structures · **planned**
 

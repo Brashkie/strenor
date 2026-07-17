@@ -34,7 +34,7 @@
 
 - [Why Strenor](#why-strenor) · [When to use it](#when-to-use-it) · [Install](#install)
 - [Quick start](#quick-start) · [Examples](#examples) · [Comparison](#comparison)
-- [API](#api) · [Value format](#value-format) · [How it works](#how-it-works) · [Performance](#performance)
+- [API](#api) · [Durability](#durability) · [Value format](#value-format) · [How it works](#how-it-works) · [Performance](#performance)
 - [Multi-platform builds & publishing](#multi-platform-builds--publishing) · [Project structure](#project-structure)
 - [Roadmap](./ROADMAP.md) · [Ecosystem](./ECOSYSTEM.md) · [Contributing](#contributing) · [License](#license)
 
@@ -286,6 +286,56 @@ db.enqueue('jobs', { id: 2 }); // -> 2
 db.dequeue('jobs'); //            -> { id: 1 }  (FIFO)
 db.llen('jobs'); //               -> 1
 ```
+
+## Durability
+
+By default Strenor is memory-only (with `dump`/`load` for snapshots). Point it at
+an **append-only log** and every mutation is journalled as it happens, then
+replayed on open — so state survives a restart *or* a crash.
+
+```ts
+const db = new Strenor({ aof: './bot.aof' });
+
+db.recovery; // { applied: 42, truncated: false }  — what the log replay found
+```
+
+| Member | Description |
+|---|---|
+| `aof` option | Path to the log. Omit for memory-only. |
+| `fsync` option | Force every write to disk. Survives power loss; much slower. |
+| `recovery` | `{ applied, truncated }` after replay, or `null` without a log |
+| `durable` | Whether a log is attached |
+| `aofSize()` | Current log size in bytes |
+| `compact()` | Rewrite the log to the shortest form that reproduces state |
+| `close()` | Flush and release the log's file handle. Always call on shutdown. |
+
+**Crash recovery.** If the process dies mid-write, the last record is torn.
+On open, Strenor replays every intact record, drops the torn tail, and reports
+`truncated: true`. The store is consistent; only writes that never reached the
+file are lost.
+
+**Compaction.** A queue that pushes and pops forever grows the log without bound
+even while holding two items. `compact()` collapses that history into the state
+itself — in `examples/durability.mjs`, 400 no-op operations grow the log to
+~9.6 KB, and compaction returns it to ~142 bytes. It writes a temp file and
+renames, so a crash mid-compaction leaves the previous log intact.
+
+**Durability levels** — pick the trade-off honestly:
+
+| Mode | Survives a process crash | Survives power loss | Speed |
+|---|---|---|---|
+| memory-only (default) | no | no | fastest |
+| `aof` | **yes** | no (last writes may be lost) | fast |
+| `aof` + `fsync: true` | **yes** | **yes** | slow (a disk sync per write) |
+
+**Closing matters.** `close()` releases the log's file handle, not just the
+sweeper timer. On Windows a file with an open handle cannot be deleted, moved, or
+reopened, so a store left open keeps its log locked for the life of the process.
+After closing, reads still work from memory while mutations throw — a write is
+never quietly left out of the journal.
+
+Snapshots are written atomically (temp file + rename) and carry a CRC-32, so a
+corrupted or truncated file is rejected instead of silently loading garbage.
 
 ## Value format
 

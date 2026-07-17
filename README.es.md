@@ -34,7 +34,7 @@
 
 - [Por qué Strenor](#por-qué-strenor) · [Cuándo usarlo](#cuándo-usarlo) · [Instalación](#instalación)
 - [Inicio rápido](#inicio-rápido) · [Ejemplos](#ejemplos) · [Comparación](#comparación)
-- [API](#api) · [Formato de valor](#formato-de-valor) · [Cómo funciona](#cómo-funciona) · [Rendimiento](#rendimiento)
+- [API](#api) · [Durabilidad](#durabilidad) · [Formato de valor](#formato-de-valor) · [Cómo funciona](#cómo-funciona) · [Rendimiento](#rendimiento)
 - [Compilación multiplataforma](#compilación-multiplataforma-y-publicación) · [Estructura del proyecto](#estructura-del-proyecto)
 - [Roadmap](./ROADMAP.md) · [Ecosistema](./ECOSYSTEM.md) · [Contribuir](#contribuir) · [Licencia](#licencia)
 
@@ -288,6 +288,56 @@ db.enqueue('jobs', { id: 2 }); // -> 2
 db.dequeue('jobs'); //            -> { id: 1 }  (FIFO)
 db.llen('jobs'); //               -> 1
 ```
+
+## Durabilidad
+
+Por defecto Strenor vive en memoria (con `dump`/`load` para snapshots). Si le das
+un **append-only log**, cada mutación se journaliza al momento y se reproduce al
+abrir — así el estado sobrevive a un reinicio *o* a un crash.
+
+```ts
+const db = new Strenor({ aof: './bot.aof' });
+
+db.recovery; // { applied: 42, truncated: false }  — qué encontró el replay
+```
+
+| Miembro | Descripción |
+|---|---|
+| opción `aof` | Ruta del log. Omítela para solo-memoria. |
+| opción `fsync` | Fuerza cada escritura al disco. Sobrevive cortes de luz; mucho más lento. |
+| `recovery` | `{ applied, truncated }` tras el replay, o `null` si no hay log |
+| `durable` | Si hay un log adjunto |
+| `aofSize()` | Tamaño actual del log en bytes |
+| `compact()` | Reescribe el log a la forma más corta que reproduce el estado |
+| `close()` | Vacía y libera el handle del log. Llámalo siempre al apagar. |
+
+**Crash recovery.** Si el proceso muere a mitad de una escritura, el último
+registro queda partido. Al abrir, Strenor reproduce todos los registros intactos,
+descarta la cola rota y reporta `truncated: true`. El store queda consistente;
+solo se pierden las escrituras que nunca llegaron al archivo.
+
+**Compactación.** Una cola que empuja y saca para siempre hace crecer el log sin
+límite aunque solo tenga dos elementos. `compact()` colapsa esa historia en el
+estado mismo — en `examples/durability.mjs`, 400 operaciones que se anulan hacen
+crecer el log a ~9.6 KB, y la compactación lo devuelve a ~142 bytes. Escribe a un
+temporal y renombra, así un crash a mitad deja el log anterior intacto.
+
+**Niveles de durabilidad** — elige el trade-off con honestidad:
+
+| Modo | Sobrevive crash del proceso | Sobrevive corte de luz | Velocidad |
+|---|---|---|---|
+| solo-memoria (default) | no | no | lo más rápido |
+| `aof` | **sí** | no (puedes perder las últimas escrituras) | rápido |
+| `aof` + `fsync: true` | **sí** | **sí** | lento (un sync a disco por escritura) |
+
+**Cerrar importa.** `close()` libera el handle del archivo del log, no solo el
+timer del sweeper. En Windows un archivo con un handle abierto no se puede borrar,
+mover ni reabrir, así que un store sin cerrar deja el log bloqueado durante toda
+la vida del proceso. Tras cerrar, las lecturas siguen funcionando desde memoria y
+las mutaciones lanzan — una escritura nunca queda fuera del journal en silencio.
+
+Los snapshots se escriben de forma atómica (temporal + rename) y llevan un CRC-32,
+así un archivo corrupto o truncado se rechaza en vez de cargar basura en silencio.
 
 ## Formato de valor
 

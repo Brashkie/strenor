@@ -28,6 +28,26 @@ export interface StrenorOptions {
   codec?: Codec;
   /** If set (ms), purge expired keys on a background (unref'd) timer. */
   sweepInterval?: number;
+  /**
+   * Path to an append-only log. Every mutation is journalled and the log is
+   * replayed on open, so state survives a restart or a crash. Without it, the
+   * store is memory-only (you can still snapshot with `dump`/`load`).
+   */
+  aof?: string;
+  /**
+   * `fsync` every write, surviving an OS crash or power loss at a large cost in
+   * throughput. Default `false`: writes reach the OS immediately (a *process*
+   * crash loses nothing), but a power cut can lose the last writes.
+   */
+  fsync?: boolean;
+}
+
+/** What replaying the log on open found. `null` when there is no log. */
+export interface Recovery {
+  /** Records applied from the log. */
+  applied: number;
+  /** A torn tail was dropped — the previous process died mid-write. */
+  truncated: boolean;
 }
 
 export interface WriteOptions {
@@ -58,7 +78,7 @@ export class Strenor {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: StrenorOptions = {}) {
-    this.db = new native.Strenor();
+    this.db = new native.Strenor(opts.aof ?? null, opts.fsync ?? null);
     this.codec = opts.codec ?? jsonCodec;
 
     // Codec registry keyed by tag, so decode() can dispatch on the stored tag.
@@ -273,6 +293,38 @@ export class Strenor {
     return b == null ? null : (this.decode(b) as T);
   }
 
+  // ---- durability (append-only log) ----
+
+  /**
+   * What replaying the log found on open, or `null` without a log.
+   * `truncated: true` means the previous process crashed mid-write and the torn
+   * tail was dropped — the store is consistent, but those last writes are gone.
+   */
+  get recovery(): Recovery | null {
+    const r = this.db.recovery;
+    return r === null ? null : { applied: r.applied, truncated: r.truncated };
+  }
+
+  /** Whether this store journals to an append-only log. */
+  get durable(): boolean {
+    return this.db.hasAof();
+  }
+
+  /** Current log size in bytes (0 without a log). */
+  aofSize(): number {
+    return this.db.aofSize();
+  }
+
+  /**
+   * Rewrite the log to the shortest form that reproduces current state, and
+   * return its new size. A queue that pushes and pops forever grows the log
+   * without bound even while holding two items; compaction collapses that
+   * history. Safe to call at runtime — it writes a temp file and renames.
+   */
+  compact(): number {
+    return this.db.compact();
+  }
+
   // ---- persistence ----
 
   /** Dump full state to a self-describing binary snapshot. */
@@ -286,12 +338,21 @@ export class Strenor {
     return this;
   }
 
-  /** Stop the background sweeper (if any). Call on shutdown. */
+  /**
+   * Release the store: stop the sweeper and flush + close the log's file handle.
+   * Idempotent.
+   *
+   * Always call this on shutdown when using `aof`. The handle is a real OS
+   * resource — on Windows the log file cannot be deleted, moved, or reopened
+   * while it stays open. After closing, reads still work from memory but
+   * mutations throw, so a write is never silently dropped from the journal.
+   */
   close(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.db.close();
   }
 }
 
