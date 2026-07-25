@@ -6,6 +6,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-24
+
+### Added
+
+- **Hashes** (field maps): `hset`, `hget`, `hdel`, `hexists`, `hkeys`, `hlen`,
+  `hgetall`. Field values reuse the same tagged format and codecs as `set`/`get`,
+  so a hash can hold strings, numbers, buffers, or objects. Journalled to the AOF
+  and included in snapshots; an emptied hash key is removed (Redis-like).
+
+### Changed
+
+- Snapshot format bumped to v4 (adds the hash type); v1–v3 snapshots still load.
+
 ## [0.2.0] - 2026-07-17
 
 Persistence: Strenor is no longer "memory with a dump".
@@ -96,7 +109,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Brashkie/strenor/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Brashkie/strenor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Brashkie/strenor/compare/v0.1.0-alpha.0...v0.1.0
 [0.1.0-alpha.0]: https://github.com/Brashkie/strenor/compare/v0.0.1-alpha.1...v0.1.0-alpha.0

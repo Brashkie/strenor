@@ -241,6 +241,31 @@ Core operations (all synchronous):
 A `Codec` is `{ tag, encode(value) => Buffer, decode(bytes) => value }` with a
 `tag` byte in `0x20..0xFE`. Full type definitions ship in `dist/index.d.ts`.
 
+### Hashes (field maps)
+
+A hash stores independent fields under one key — ideal for sessions and configs.
+Field values reuse the same tagged format and codecs as `set`/`get`, so a field
+can hold a string, number, buffer, or object.
+
+| Method | Description |
+|---|---|
+| `hset(key, field, value, opts?)` | Set a field; returns `true` if it was new |
+| `hget<T>(key, field)` | Get one field, decoded; `null` if missing |
+| `hdel(key, field)` | Delete a field; `true` if it existed |
+| `hexists(key, field)` | Whether the field is present |
+| `hkeys(key)` | Field names (empty if missing) |
+| `hlen(key)` | Number of fields (0 if missing) |
+| `hgetall<T>(key)` | The whole hash as a decoded object |
+
+```ts
+db.hset('session:alice', 'step', 'checkout');
+db.hset('session:alice', 'cart', ['book', 'pen']);
+db.hgetall('session:alice'); // { step: 'checkout', cart: ['book', 'pen'] }
+```
+
+An emptied hash key is removed automatically. Operations on a non-hash key raise
+`WRONGTYPE`.
+
 ### Counters
 
 Atomic integer counters — ideal for rate limits, message counts, and sequence

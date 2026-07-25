@@ -21,6 +21,18 @@ fn io_err(err: std::io::Error) -> Error {
 
 /// A list op can fail on structure type or on journalling; map both faithfully
 /// so the JS side can tell "wrong type" from "the disk is full".
+/// Flatten `[(field, value)]` into `[field0, value0, field1, value1, …]` Buffers.
+/// `hgetall` returns this and the TS layer re-pairs it — simpler and faster than
+/// bridging a map type through NAPI.
+fn flatten_pairs(pairs: Vec<(String, Vec<u8>)>) -> Vec<Buffer> {
+    let mut out = Vec::with_capacity(pairs.len() * 2);
+    for (field, value) in pairs {
+        out.push(Buffer::from(field.into_bytes()));
+        out.push(Buffer::from(value));
+    }
+    out
+}
+
 fn list_err(e: ListError) -> Error {
     match e {
         ListError::WrongType => Error::new(Status::GenericFailure, WRONGTYPE_MSG),
@@ -179,6 +191,53 @@ impl Strenor {
         self.store
             .lrange(&key, start, stop)
             .map(|v| v.into_iter().map(Buffer::from).collect())
+            .map_err(wrongtype)
+    }
+
+    // ── Hash ──────────────────────────────────────────────────────────────
+
+    #[napi]
+    pub fn hset(&self, key: String, field: String, value: Buffer) -> Result<bool> {
+        self.store
+            .hset(&key, field, value.to_vec())
+            .map_err(list_err)
+    }
+
+    #[napi]
+    pub fn hget(&self, key: String, field: String) -> Result<Option<Buffer>> {
+        self.store
+            .hget(&key, &field)
+            .map(|o| o.map(Buffer::from))
+            .map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn hdel(&self, key: String, field: String) -> Result<bool> {
+        self.store.hdel(&key, &field).map_err(list_err)
+    }
+
+    #[napi]
+    pub fn hexists(&self, key: String, field: String) -> Result<bool> {
+        self.store.hexists(&key, &field).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn hkeys(&self, key: String) -> Result<Vec<String>> {
+        self.store.hkeys(&key).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn hlen(&self, key: String) -> Result<u32> {
+        self.store.hlen(&key).map_err(wrongtype)
+    }
+
+    /// Returns a flat `[field0, value0, field1, value1, …]` array; the TS layer
+    /// pairs and decodes it. Avoids modelling a Rust map across the FFI boundary.
+    #[napi]
+    pub fn hgetall(&self, key: String) -> Result<Vec<Buffer>> {
+        self.store
+            .hgetall(&key)
+            .map(flatten_pairs)
             .map_err(wrongtype)
     }
 

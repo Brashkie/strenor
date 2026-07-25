@@ -294,6 +294,69 @@ describe('Strenor', () => {
     });
   });
 
+  describe('hashes', () => {
+    it('hset/hget round-trip values via codecs', () => {
+      expect(db.hset('u:1', 'name', 'alice')).toBe(true); // new field
+      expect(db.hset('u:1', 'name', 'bob')).toBe(false); // overwrite
+      db.hset('u:1', 'age', 20);
+      db.hset('u:1', 'meta', { admin: true });
+      expect(db.hget('u:1', 'name')).toBe('bob');
+      expect(db.hget<number>('u:1', 'age')).toBe(20); // number preserved
+      expect(db.hget('u:1', 'meta')).toEqual({ admin: true });
+      expect(db.hget('u:1', 'missing')).toBeNull();
+      expect(db.hget('nokey', 'f')).toBeNull();
+    });
+
+    it('hexists / hkeys / hlen', () => {
+      db.hset('h', 'a', 1);
+      db.hset('h', 'b', 2);
+      expect(db.hlen('h')).toBe(2);
+      expect(db.hexists('h', 'a')).toBe(true);
+      expect(db.hexists('h', 'z')).toBe(false);
+      expect(db.hkeys('h').sort()).toEqual(['a', 'b']);
+      expect(db.hlen('missing')).toBe(0);
+      expect(db.hkeys('missing')).toEqual([]);
+      expect(db.hexists('missing', 'a')).toBe(false);
+    });
+
+    it('hgetall returns a decoded object', () => {
+      db.hset('cfg', 'theme', 'dark');
+      db.hset('cfg', 'count', 3);
+      expect(db.hgetall('cfg')).toEqual({ theme: 'dark', count: 3 });
+      expect(db.hgetall('missing')).toEqual({});
+    });
+
+    it('hdel removes fields and deletes the emptied key', () => {
+      db.hset('h', 'only', 'v');
+      expect(db.hdel('h', 'only')).toBe(true);
+      expect(db.hdel('h', 'only')).toBe(false);
+      expect(db.exists('h')).toBe(false); // last field gone -> key removed
+    });
+
+    it('throws WRONGTYPE on mismatched operations', () => {
+      db.set('str', 'hola');
+      expect(() => db.hset('str', 'f', 1)).toThrow(/WRONGTYPE/);
+      expect(() => db.hget('str', 'f')).toThrow(/WRONGTYPE/);
+      expect(() => db.hdel('str', 'f')).toThrow(/WRONGTYPE/);
+      expect(() => db.hexists('str', 'f')).toThrow(/WRONGTYPE/);
+      expect(() => db.hkeys('str')).toThrow(/WRONGTYPE/);
+      expect(() => db.hlen('str')).toThrow(/WRONGTYPE/);
+      expect(() => db.hgetall('str')).toThrow(/WRONGTYPE/);
+
+      db.hset('h', 'f', 'v');
+      expect(() => db.get('h')).toThrow(/WRONGTYPE/); // a hash is not bytes
+    });
+
+    it('hashes survive a snapshot round-trip', () => {
+      db.hset('u:1', 'name', 'alice');
+      db.hset('u:1', 'age', 20);
+      db.dump(SNAP);
+      const fresh = new Strenor();
+      fresh.load(SNAP);
+      expect(fresh.hgetall('u:1')).toEqual({ name: 'alice', age: 20 });
+    });
+  });
+
   describe('durability (append-only log)', () => {
     const AOF = './test.aof.tmp';
     const clean = () => {

@@ -27,6 +27,8 @@ pub(crate) const OP_PUSH_FRONT: u8 = 6;
 pub(crate) const OP_PUSH_BACK: u8 = 7;
 pub(crate) const OP_POP_FRONT: u8 = 8;
 pub(crate) const OP_POP_BACK: u8 = 9;
+pub(crate) const OP_HSET: u8 = 10;
+pub(crate) const OP_HDEL: u8 = 11;
 
 /// CRC-32 (IEEE), table-driven. Built at compile time — no dependency, no
 /// runtime init. Used for error detection only; this is not a hash for security.
@@ -93,6 +95,21 @@ pub(crate) fn rec_push(op: u8, key: &str, value: &[u8]) -> Vec<u8> {
     let mut p = vec![op];
     put_bytes(&mut p, key.as_bytes());
     put_bytes(&mut p, value);
+    p
+}
+
+pub(crate) fn rec_hset(key: &str, field: &str, value: &[u8]) -> Vec<u8> {
+    let mut p = vec![OP_HSET];
+    put_bytes(&mut p, key.as_bytes());
+    put_bytes(&mut p, field.as_bytes());
+    put_bytes(&mut p, value);
+    p
+}
+
+pub(crate) fn rec_hdel(key: &str, field: &str) -> Vec<u8> {
+    let mut p = vec![OP_HDEL];
+    put_bytes(&mut p, key.as_bytes());
+    put_bytes(&mut p, field.as_bytes());
     p
 }
 

@@ -31,6 +31,13 @@ export interface NativeStrenorInstance {
   popBack(key: string): Buffer | null;
   llen(key: string): number;
   lrange(key: string, start: number, stop: number): Buffer[];
+  hset(key: string, field: string, value: Buffer): boolean;
+  hget(key: string, field: string): Buffer | null;
+  hdel(key: string, field: string): boolean;
+  hexists(key: string, field: string): boolean;
+  hkeys(key: string): string[];
+  hlen(key: string): number;
+  hgetall(key: string): Buffer[];
   close(): void;
   hasAof(): boolean;
   aofSize(): number;

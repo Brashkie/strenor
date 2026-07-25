@@ -26,13 +26,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// - v1: bytes only.
 /// - v2: adds a structure-type byte per entry (lists).
 /// - v3: adds a trailing CRC-32 over the body (corruption detection).
+/// - v4: adds the hash structure type.
 ///
 /// Older versions still load, so existing snapshots keep working.
 pub const MAGIC: &[u8; 4] = b"STRN";
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 
 const TYPE_BYTES: u8 = 0;
 const TYPE_LIST: u8 = 1;
+const TYPE_HASH: u8 = 2;
 
 /// A structure-typed value. The engine distinguishes these; it never looks
 /// inside a blob. New engine structures (Hash, Set, SortedSet) will be added
@@ -40,6 +42,7 @@ const TYPE_LIST: u8 = 1;
 enum Value {
     Bytes(Vec<u8>),
     List(VecDeque<Vec<u8>>),
+    Hash(HashMap<String, Vec<u8>>),
 }
 
 /// A stored record: a typed value plus an optional expiration (TTL applies to
@@ -151,7 +154,7 @@ fn apply_push(
                 }
                 Ok(l.len() as u32)
             }
-            Value::Bytes(_) => Err(WrongType),
+            _ => Err(WrongType),
         },
         None => {
             let mut l = VecDeque::new();
@@ -165,6 +168,48 @@ fn apply_push(
             );
             Ok(1)
         }
+    }
+}
+
+fn apply_hset(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    field: String,
+    value: Vec<u8>,
+) -> Result<bool, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::Hash(h) => Ok(h.insert(field, value).is_none()),
+            _ => Err(WrongType),
+        },
+        None => {
+            let mut h = HashMap::new();
+            h.insert(field, value);
+            map.insert(
+                key.to_string(),
+                Entry {
+                    value: Value::Hash(h),
+                    expire_at: None,
+                },
+            );
+            Ok(true)
+        }
+    }
+}
+
+fn apply_hdel(map: &mut HashMap<String, Entry>, key: &str, field: &str) -> Result<bool, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::Hash(h) => {
+                let existed = h.remove(field).is_some();
+                if h.is_empty() {
+                    map.remove(key); // an empty hash key is deleted (Redis-like)
+                }
+                Ok(existed)
+            }
+            _ => Err(WrongType),
+        },
+        None => Ok(false),
     }
 }
 
@@ -182,7 +227,7 @@ fn apply_pop(
                 }
                 Ok(v)
             }
-            Value::Bytes(_) => Err(WrongType),
+            _ => Err(WrongType),
         },
         None => Ok(None),
     }
@@ -299,6 +344,20 @@ impl Store {
                 }
                 None => false,
             },
+            aof::OP_HSET => match (c.string(), c.string(), c.bytes()) {
+                (Some(k), Some(field), Some(v)) => {
+                    let _ = apply_hset(map, &k, field, v.to_vec());
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_HDEL => match (c.string(), c.string()) {
+                (Some(k), Some(field)) => {
+                    let _ = apply_hdel(map, &k, &field);
+                    true
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -371,7 +430,7 @@ impl Store {
             }
             Some(e) => match &e.value {
                 Value::Bytes(bytes) => Ok(Some(bytes.clone())),
-                Value::List(_) => Err(WrongType),
+                _ => Err(WrongType),
             },
             None => Ok(None),
         }
@@ -558,7 +617,7 @@ impl Store {
         match inner.map.get(key) {
             Some(e) => match &e.value {
                 Value::List(l) => Ok(l.len() as u32),
-                Value::Bytes(_) => Err(WrongType),
+                _ => Err(WrongType),
             },
             None => Ok(0),
         }
@@ -599,7 +658,116 @@ impl Store {
                         .cloned()
                         .collect())
                 }
-                Value::Bytes(_) => Err(WrongType),
+                _ => Err(WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    // ── Hash ──────────────────────────────────────────────────────────────
+
+    fn hash_expired(&self, inner: &mut Inner, key: &str, now: u64) {
+        if inner
+            .map
+            .get(key)
+            .map(|e| is_expired(e, now))
+            .unwrap_or(false)
+        {
+            inner.map.remove(key);
+        }
+    }
+
+    /// Set `field` in the hash at `key` (creating it). Returns true if the field
+    /// was new. `WrongType` if the key holds a non-hash.
+    pub fn hset(&self, key: &str, field: String, value: Vec<u8>) -> Result<bool, ListError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let rec = aof::rec_hset(key, &field, &value);
+        let is_new = apply_hset(&mut inner.map, key, field, value)?;
+        Self::journal(&mut inner, rec)?;
+        Ok(is_new)
+    }
+
+    /// Get `field` from the hash at `key`. `None` if the key or field is missing.
+    pub fn hget(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Hash(h) => Ok(h.get(field).cloned()),
+                _ => Err(WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Delete `field`. Returns true if it existed. An emptied hash key is removed.
+    pub fn hdel(&self, key: &str, field: &str) -> Result<bool, ListError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let existed = apply_hdel(&mut inner.map, key, field)?;
+        if existed {
+            Self::journal(&mut inner, aof::rec_hdel(key, field))?;
+        }
+        Ok(existed)
+    }
+
+    /// Whether `field` exists in the hash at `key`.
+    pub fn hexists(&self, key: &str, field: &str) -> Result<bool, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Hash(h) => Ok(h.contains_key(field)),
+                _ => Err(WrongType),
+            },
+            None => Ok(false),
+        }
+    }
+
+    /// All field names (0 if missing). `WrongType` if the key holds a non-hash.
+    pub fn hkeys(&self, key: &str) -> Result<Vec<String>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Hash(h) => Ok(h.keys().cloned().collect()),
+                _ => Err(WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Number of fields (0 if missing). `WrongType` if the key holds a non-hash.
+    pub fn hlen(&self, key: &str) -> Result<u32, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Hash(h) => Ok(h.len() as u32),
+                _ => Err(WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    /// All (field, value) pairs (empty if missing). `WrongType` on a non-hash.
+    pub fn hgetall(&self, key: &str) -> Result<Vec<(String, Vec<u8>)>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Hash(h) => Ok(h.iter().map(|(f, v)| (f.clone(), v.clone())).collect()),
+                _ => Err(WrongType),
             },
             None => Ok(Vec::new()),
         }
@@ -651,6 +819,15 @@ impl Store {
                         records.push(aof::rec_expire(k, exp));
                     }
                 }
+                Value::Hash(h) => {
+                    for (field, val) in h {
+                        records.push(aof::rec_hset(k, field, val));
+                    }
+                    // hset doesn't carry a TTL, so restore it explicitly.
+                    if let Some(exp) = e.expire_at {
+                        records.push(aof::rec_expire(k, exp));
+                    }
+                }
             }
         }
         let aof = inner.aof.as_mut().unwrap();
@@ -694,6 +871,17 @@ impl Store {
                         buf.extend_from_slice(elem);
                     }
                 }
+                Value::Hash(h) => {
+                    buf.push(TYPE_HASH);
+                    buf.extend_from_slice(&(h.len() as u32).to_le_bytes());
+                    for (field, val) in h {
+                        let fb = field.as_bytes();
+                        buf.extend_from_slice(&(fb.len() as u32).to_le_bytes());
+                        buf.extend_from_slice(fb);
+                        buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+                        buf.extend_from_slice(val);
+                    }
+                }
             }
         }
         let checksum = crc32(&buf);
@@ -701,7 +889,7 @@ impl Store {
         buf
     }
 
-    /// Load a snapshot, replacing all current state. Accepts versions 1–3.
+    /// Load a snapshot, replacing all current state. Accepts versions 1–4.
     ///
     /// For v3 the trailing CRC is verified first, so a corrupted file is
     /// rejected instead of silently loading garbage.
@@ -788,6 +976,23 @@ impl Store {
                         l.push_back(body[at..at + el].to_vec());
                     }
                     Value::List(l)
+                }
+                TYPE_HASH => {
+                    let at = read(&mut p, 4)?;
+                    let n = u32_at(body, at) as usize;
+                    let mut h = HashMap::with_capacity(n);
+                    for _ in 0..n {
+                        let at = read(&mut p, 4)?;
+                        let fl = u32_at(body, at) as usize;
+                        let at = read(&mut p, fl)?;
+                        let field = String::from_utf8(body[at..at + fl].to_vec())
+                            .map_err(|_| bad("invalid utf8 hash field"))?;
+                        let at = read(&mut p, 4)?;
+                        let vl = u32_at(body, at) as usize;
+                        let at = read(&mut p, vl)?;
+                        h.insert(field, body[at..at + vl].to_vec());
+                    }
+                    Value::Hash(h)
                 }
                 _ => return Err(bad("unknown entry type in snapshot")),
             };
@@ -1144,5 +1349,141 @@ mod tests {
         assert!(s.is_closed());
         assert_eq!(s.get("k"), Ok(Some(b("v"))));
         assert!(s.set("x".into(), b("y"), None).is_err());
+    }
+
+    #[test]
+    fn hash_basic_ops() {
+        let s = Store::new();
+        assert!(s.hset("u:1", "name".into(), b("alice")).unwrap()); // new field
+        assert!(!s.hset("u:1", "name".into(), b("bob")).unwrap()); // overwrite
+        assert_eq!(s.hget("u:1", "name").unwrap(), Some(b("bob")));
+        assert_eq!(s.hget("u:1", "missing").unwrap(), None);
+        assert_eq!(s.hget("missing", "x").unwrap(), None);
+
+        s.hset("u:1", "age".into(), b("20")).unwrap();
+        assert_eq!(s.hlen("u:1"), Ok(2));
+        assert!(s.hexists("u:1", "age").unwrap());
+        assert!(!s.hexists("u:1", "nope").unwrap());
+        let mut ks = s.hkeys("u:1").unwrap();
+        ks.sort();
+        assert_eq!(ks, vec!["age".to_string(), "name".to_string()]);
+
+        assert!(s.hdel("u:1", "age").unwrap());
+        assert!(!s.hdel("u:1", "age").unwrap());
+        assert_eq!(s.hlen("u:1"), Ok(1));
+    }
+
+    #[test]
+    fn hash_empty_key_is_removed() {
+        let s = Store::new();
+        s.hset("h", "only".into(), b("v")).unwrap();
+        assert!(s.exists("h"));
+        s.hdel("h", "only").unwrap();
+        assert!(!s.exists("h")); // last field gone -> key deleted
+        assert_eq!(s.hlen("h"), Ok(0));
+        assert_eq!(s.hgetall("h").unwrap(), Vec::new());
+        assert!(s.hkeys("h").unwrap().is_empty());
+    }
+
+    #[test]
+    fn hash_hgetall() {
+        let s = Store::new();
+        s.hset("cfg", "a".into(), b("1")).unwrap();
+        s.hset("cfg", "b".into(), b("2")).unwrap();
+        let mut all = s.hgetall("cfg").unwrap();
+        all.sort();
+        assert_eq!(all, vec![("a".into(), b("1")), ("b".into(), b("2"))]);
+    }
+
+    #[test]
+    fn hash_wrong_type() {
+        let s = Store::new();
+        s.set("str".into(), b("hola"), None).unwrap();
+        assert!(matches!(
+            s.hset("str", "f".into(), b("x")),
+            Err(ListError::WrongType)
+        ));
+        assert!(matches!(s.hdel("str", "f"), Err(ListError::WrongType)));
+        assert_eq!(s.hget("str", "f"), Err(WrongType));
+        assert_eq!(s.hexists("str", "f"), Err(WrongType));
+        assert_eq!(s.hkeys("str"), Err(WrongType));
+        assert_eq!(s.hlen("str"), Err(WrongType));
+        assert_eq!(s.hgetall("str"), Err(WrongType));
+
+        // And a hash is not a string/list.
+        s.hset("h", "f".into(), b("v")).unwrap();
+        assert_eq!(s.get("h"), Err(WrongType));
+        assert!(matches!(
+            s.push_back("h", b("x")),
+            Err(ListError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn hash_honors_ttl() {
+        let s = Store::new();
+        s.hset("sess", "step".into(), b("menu")).unwrap();
+        assert!(s.expire("sess", 60_000).unwrap());
+        assert!(s.ttl("sess") > 0);
+        s.set("k".into(), b("v"), Some(1)).unwrap();
+
+        s.hset("dead", "f".into(), b("v")).unwrap();
+        s.expire("dead", 1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert_eq!(s.hget("dead", "f").unwrap(), None); // lazily expired
+        assert_eq!(s.hlen("dead"), Ok(0));
+    }
+
+    #[test]
+    fn hash_snapshot_roundtrip() {
+        let s = Store::new();
+        s.hset("u:1", "name".into(), b("alice")).unwrap();
+        s.hset("u:1", "age".into(), b("20")).unwrap();
+        s.set("plain".into(), b("x"), None).unwrap();
+        let bytes = s.dump_bytes();
+
+        let fresh = Store::new();
+        fresh.load_bytes(&bytes).unwrap();
+        assert_eq!(fresh.hget("u:1", "name").unwrap(), Some(b("alice")));
+        assert_eq!(fresh.hget("u:1", "age").unwrap(), Some(b("20")));
+        assert_eq!(fresh.hlen("u:1"), Ok(2));
+        assert_eq!(fresh.get("plain"), Ok(Some(b("x"))));
+    }
+
+    #[test]
+    fn hash_aof_replay_and_compaction() {
+        let tmp = Tmp::new("hash-aof");
+        {
+            let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+            s.hset("u:1", "name".into(), b("alice")).unwrap();
+            s.hset("u:1", "tmp".into(), b("x")).unwrap();
+            s.hdel("u:1", "tmp").unwrap();
+            // Churn to grow the log.
+            for i in 0..100 {
+                s.hset("u:1", "counter".into(), b(&i.to_string())).unwrap();
+            }
+            s.expire("u:1", 60_000).unwrap();
+            s.close().unwrap();
+        }
+
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec.truncated);
+        assert_eq!(s2.hget("u:1", "name").unwrap(), Some(b("alice")));
+        assert_eq!(s2.hget("u:1", "tmp").unwrap(), None); // deleted field stays deleted
+        assert_eq!(s2.hget("u:1", "counter").unwrap(), Some(b("99")));
+        assert!(s2.ttl("u:1") > 0);
+
+        let before = s2.aof_size();
+        s2.compact().unwrap();
+        let after = s2.aof_size();
+        assert!(after < before);
+        s2.close().unwrap();
+
+        // State (and TTL) survive reopening from the compacted log.
+        let (s3, _) = Store::with_aof(tmp.path(), false).unwrap();
+        assert_eq!(s3.hget("u:1", "counter").unwrap(), Some(b("99")));
+        assert_eq!(s3.hlen("u:1"), Ok(2)); // name + counter
+        assert!(s3.ttl("u:1") > 0);
+        s3.close().unwrap();
     }
 }

@@ -293,6 +293,49 @@ export class Strenor {
     return b == null ? null : (this.decode(b) as T);
   }
 
+  // ---- hashes (field maps) ----
+
+  /** Set `field` in the hash at `key`. Returns true if the field was new. */
+  hset(key: string, field: string, value: unknown, opts?: WriteOptions): boolean {
+    return this.db.hset(key, field, this.encode(value, opts));
+  }
+
+  /** Get one field from the hash at `key`. `null` if key or field is missing. */
+  hget<T = unknown>(key: string, field: string): T | null {
+    const b = this.db.hget(key, field);
+    return b == null ? null : (this.decode(b) as T);
+  }
+
+  /** Delete a field. Returns true if it existed. An emptied hash key is removed. */
+  hdel(key: string, field: string): boolean {
+    return this.db.hdel(key, field);
+  }
+
+  /** Whether `field` exists in the hash at `key`. */
+  hexists(key: string, field: string): boolean {
+    return this.db.hexists(key, field);
+  }
+
+  /** All field names of the hash at `key` (empty if missing). */
+  hkeys(key: string): string[] {
+    return this.db.hkeys(key);
+  }
+
+  /** Number of fields in the hash at `key` (0 if missing). */
+  hlen(key: string): number {
+    return this.db.hlen(key);
+  }
+
+  /** The whole hash at `key` as an object, with values decoded via codecs. */
+  hgetall<T = Record<string, unknown>>(key: string): T {
+    const flat = this.db.hgetall(key); // [field0, value0, field1, value1, …]
+    const out: Record<string, unknown> = {};
+    for (let i = 0; i < flat.length; i += 2) {
+      out[flat[i].toString('utf8')] = this.decode(flat[i + 1]);
+    }
+    return out as T;
+  }
+
   // ---- durability (append-only log) ----
 
   /**

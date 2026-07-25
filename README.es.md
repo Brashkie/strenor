@@ -242,6 +242,31 @@ Operaciones núcleo (todas síncronas):
 Un `Codec` es `{ tag, encode(value) => Buffer, decode(bytes) => value }` con un
 byte `tag` en `0x20..0xFE`. Las definiciones de tipos van en `dist/index.d.ts`.
 
+### Hashes (mapas de campos)
+
+Un hash guarda campos independientes bajo una sola clave — ideal para sesiones y
+configs. Los valores de campo reutilizan el mismo formato etiquetado y codecs que
+`set`/`get`, así que un campo puede ser string, número, buffer u objeto.
+
+| Método | Descripción |
+|---|---|
+| `hset(key, field, value, opts?)` | Fija un campo; devuelve `true` si era nuevo |
+| `hget<T>(key, field)` | Obtiene un campo, decodificado; `null` si falta |
+| `hdel(key, field)` | Borra un campo; `true` si existía |
+| `hexists(key, field)` | Si el campo está presente |
+| `hkeys(key)` | Nombres de campos (vacío si no existe) |
+| `hlen(key)` | Cantidad de campos (0 si no existe) |
+| `hgetall<T>(key)` | Todo el hash como objeto decodificado |
+
+```ts
+db.hset('session:alice', 'step', 'checkout');
+db.hset('session:alice', 'cart', ['book', 'pen']);
+db.hgetall('session:alice'); // { step: 'checkout', cart: ['book', 'pen'] }
+```
+
+Un hash vacío se elimina automáticamente. Las operaciones sobre una clave que no
+es hash lanzan `WRONGTYPE`.
+
 ### Contadores
 
 Contadores enteros atómicos — ideales para rate limits, conteo de mensajes e IDs

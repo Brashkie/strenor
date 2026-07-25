@@ -58,13 +58,14 @@ Shipped in `0.2.0`:
 - CRC-32 checksums + corruption detection on snapshots and every log record.
 - Atomic snapshot writes (temp file + rename).
 
-### v0.3.x — Data structures · **planned**
+### v0.3.x — Data structures · **in progress**
 
 Grow the type set — the useful subset of Redis, not all of it.
 
-- `hash`, `set`, `sorted set`
-- `bitset`, optional bloom filter
-- Built-in MsgPack and CBOR codecs
+- `hash` — shipped in `0.3.0` (`hset`/`hget`/`hdel`/`hexists`/`hkeys`/`hlen`/`hgetall`).
+- `set`, `sorted set` — planned.
+- `bitset`, optional bloom filter — planned.
+- Built-in MsgPack and CBOR codecs — planned.
 
 ### v0.4.x — Transactions · **planned**
 
