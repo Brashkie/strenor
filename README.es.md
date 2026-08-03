@@ -267,6 +267,35 @@ db.hgetall('session:alice'); // { step: 'checkout', cart: ['book', 'pen'] }
 Un hash vacío se elimina automáticamente. Las operaciones sobre una clave que no
 es hash lanzan `WRONGTYPE`.
 
+### Sets (miembros únicos)
+
+Un set guarda miembros sin duplicados — ideal para deduplicación, "ya visto", o
+usuarios únicos. Los miembros reutilizan el formato etiquetado y codecs; la
+unicidad es por los **bytes serializados exactos**.
+
+| Método | Descripción |
+|---|---|
+| `sadd(key, member, opts?)` | Agrega; `true` si era nuevo |
+| `srem(key, member, opts?)` | Quita; `true` si estaba presente |
+| `sismember(key, member, opts?)` | Si el miembro pertenece al set |
+| `smembers<T>(key)` | Todos los miembros, decodificados (orden no garantizado) |
+| `scard(key)` | Cantidad de miembros (0 si no existe) |
+
+```ts
+db.sadd('online', 'alice');
+db.sadd('online', 'alice'); // duplicado, ignorado
+db.scard('online'); // 1
+```
+
+> [!NOTE]
+> La unicidad compara los bytes serializados. Para strings, números y buffers es
+> exactamente lo que esperas. Para **objetos**, dos objetos con el mismo contenido
+> pero distinto orden de claves se consideran distintos (`{a:1,b:2}` ≠ `{b:2,a:1}`).
+> Para sets, usa miembros primitivos.
+
+Un set vacío se elimina automáticamente. Operaciones sobre una clave que no es set
+lanzan `WRONGTYPE`.
+
 ### Contadores
 
 Contadores enteros atómicos — ideales para rate limits, conteo de mensajes e IDs

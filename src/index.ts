@@ -336,6 +336,33 @@ export class Strenor {
     return out as T;
   }
 
+  // ---- sets (unique members) ----
+
+  /** Add `member` to the set at `key`. Returns true if it was new. */
+  sadd(key: string, member: unknown, opts?: WriteOptions): boolean {
+    return this.db.sadd(key, this.encode(member, opts));
+  }
+
+  /** Remove `member`. Returns true if it was present. An emptied set is removed. */
+  srem(key: string, member: unknown, opts?: WriteOptions): boolean {
+    return this.db.srem(key, this.encode(member, opts));
+  }
+
+  /** Whether `member` is in the set at `key`. */
+  sismember(key: string, member: unknown, opts?: WriteOptions): boolean {
+    return this.db.sismember(key, this.encode(member, opts));
+  }
+
+  /** All members of the set at `key`, decoded (order unspecified). */
+  smembers<T = unknown>(key: string): T[] {
+    return this.db.smembers(key).map((b) => this.decode(b) as T);
+  }
+
+  /** Number of members in the set at `key` (0 if missing). */
+  scard(key: string): number {
+    return this.db.scard(key);
+  }
+
   // ---- durability (append-only log) ----
 
   /**

@@ -241,6 +241,36 @@ impl Strenor {
             .map_err(wrongtype)
     }
 
+    // ── Set ───────────────────────────────────────────────────────────────
+
+    #[napi]
+    pub fn sadd(&self, key: String, member: Buffer) -> Result<bool> {
+        self.store.sadd(&key, member.to_vec()).map_err(list_err)
+    }
+
+    #[napi]
+    pub fn srem(&self, key: String, member: Buffer) -> Result<bool> {
+        self.store.srem(&key, &member).map_err(list_err)
+    }
+
+    #[napi]
+    pub fn sismember(&self, key: String, member: Buffer) -> Result<bool> {
+        self.store.sismember(&key, &member).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn smembers(&self, key: String) -> Result<Vec<Buffer>> {
+        self.store
+            .smembers(&key)
+            .map(|v| v.into_iter().map(Buffer::from).collect())
+            .map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn scard(&self, key: String) -> Result<u32> {
+        self.store.scard(&key).map_err(wrongtype)
+    }
+
     // ── AOF ───────────────────────────────────────────────────────────────
 
     #[napi]

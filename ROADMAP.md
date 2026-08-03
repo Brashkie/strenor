@@ -63,7 +63,8 @@ Shipped in `0.2.0`:
 Grow the type set — the useful subset of Redis, not all of it.
 
 - `hash` — shipped in `0.3.0` (`hset`/`hget`/`hdel`/`hexists`/`hkeys`/`hlen`/`hgetall`).
-- `set`, `sorted set` — planned.
+- `set` — shipped in `0.3.1` (`sadd`/`srem`/`sismember`/`smembers`/`scard`).
+- `sorted set` — planned.
 - `bitset`, optional bloom filter — planned.
 - Built-in MsgPack and CBOR codecs — planned.
 

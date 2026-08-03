@@ -357,6 +357,54 @@ describe('Strenor', () => {
     });
   });
 
+  describe('sets', () => {
+    it('sadd is unique and scard/sismember work', () => {
+      expect(db.sadd('tags', 'rust')).toBe(true);
+      expect(db.sadd('tags', 'rust')).toBe(false); // duplicate
+      db.sadd('tags', 'napi');
+      db.sadd('tags', 42); // numbers via codec
+      expect(db.scard('tags')).toBe(3);
+      expect(db.sismember('tags', 'rust')).toBe(true);
+      expect(db.sismember('tags', 42)).toBe(true);
+      expect(db.sismember('tags', 'ghost')).toBe(false);
+      expect(db.sismember('missing', 'x')).toBe(false);
+      expect(db.smembers('tags').sort()).toEqual([42, 'napi', 'rust']);
+      expect(db.smembers('missing')).toEqual([]);
+      expect(db.scard('missing')).toBe(0);
+    });
+
+    it('srem removes members and deletes the emptied key', () => {
+      db.sadd('s', 'a');
+      db.sadd('s', 'b');
+      expect(db.srem('s', 'a')).toBe(true);
+      expect(db.srem('s', 'a')).toBe(false);
+      expect(db.srem('s', 'b')).toBe(true);
+      expect(db.exists('s')).toBe(false); // emptied -> removed
+    });
+
+    it('throws WRONGTYPE on mismatched operations', () => {
+      db.set('str', 'hola');
+      expect(() => db.sadd('str', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.srem('str', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.sismember('str', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.smembers('str')).toThrow(/WRONGTYPE/);
+      expect(() => db.scard('str')).toThrow(/WRONGTYPE/);
+
+      db.sadd('set', 'm');
+      expect(() => db.get('set')).toThrow(/WRONGTYPE/);
+    });
+
+    it('sets survive a snapshot round-trip', () => {
+      db.sadd('online', 'u1');
+      db.sadd('online', 'u2');
+      db.dump(SNAP);
+      const fresh = new Strenor();
+      fresh.load(SNAP);
+      expect(fresh.scard('online')).toBe(2);
+      expect(fresh.sismember('online', 'u1')).toBe(true);
+    });
+  });
+
   describe('durability (append-only log)', () => {
     const AOF = './test.aof.tmp';
     const clean = () => {

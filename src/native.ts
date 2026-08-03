@@ -38,6 +38,11 @@ export interface NativeStrenorInstance {
   hkeys(key: string): string[];
   hlen(key: string): number;
   hgetall(key: string): Buffer[];
+  sadd(key: string, member: Buffer): boolean;
+  srem(key: string, member: Buffer): boolean;
+  sismember(key: string, member: Buffer): boolean;
+  smembers(key: string): Buffer[];
+  scard(key: string): number;
   close(): void;
   hasAof(): boolean;
   aofSize(): number;

@@ -18,7 +18,7 @@ mod aof;
 use aof::Aof;
 pub use aof::{crc32, write_atomic};
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,14 +27,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// - v2: adds a structure-type byte per entry (lists).
 /// - v3: adds a trailing CRC-32 over the body (corruption detection).
 /// - v4: adds the hash structure type.
+/// - v5: adds the set structure type.
 ///
 /// Older versions still load, so existing snapshots keep working.
 pub const MAGIC: &[u8; 4] = b"STRN";
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 
 const TYPE_BYTES: u8 = 0;
 const TYPE_LIST: u8 = 1;
 const TYPE_HASH: u8 = 2;
+const TYPE_SET: u8 = 3;
 
 /// A structure-typed value. The engine distinguishes these; it never looks
 /// inside a blob. New engine structures (Hash, Set, SortedSet) will be added
@@ -43,6 +45,7 @@ enum Value {
     Bytes(Vec<u8>),
     List(VecDeque<Vec<u8>>),
     Hash(HashMap<String, Vec<u8>>),
+    Set(HashSet<Vec<u8>>),
 }
 
 /// A stored record: a typed value plus an optional expiration (TTL applies to
@@ -213,6 +216,51 @@ fn apply_hdel(map: &mut HashMap<String, Entry>, key: &str, field: &str) -> Resul
     }
 }
 
+fn apply_sadd(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    member: Vec<u8>,
+) -> Result<bool, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::Set(set) => Ok(set.insert(member)),
+            _ => Err(WrongType),
+        },
+        None => {
+            let mut set = HashSet::new();
+            set.insert(member);
+            map.insert(
+                key.to_string(),
+                Entry {
+                    value: Value::Set(set),
+                    expire_at: None,
+                },
+            );
+            Ok(true)
+        }
+    }
+}
+
+fn apply_srem(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    member: &[u8],
+) -> Result<bool, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::Set(set) => {
+                let removed = set.remove(member);
+                if set.is_empty() {
+                    map.remove(key); // an empty set key is deleted (Redis-like)
+                }
+                Ok(removed)
+            }
+            _ => Err(WrongType),
+        },
+        None => Ok(false),
+    }
+}
+
 fn apply_pop(
     map: &mut HashMap<String, Entry>,
     key: &str,
@@ -354,6 +402,20 @@ impl Store {
             aof::OP_HDEL => match (c.string(), c.string()) {
                 (Some(k), Some(field)) => {
                     let _ = apply_hdel(map, &k, &field);
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_SADD => match (c.string(), c.bytes()) {
+                (Some(k), Some(m)) => {
+                    let _ = apply_sadd(map, &k, m.to_vec());
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_SREM => match (c.string(), c.bytes()) {
+                (Some(k), Some(m)) => {
+                    let _ = apply_srem(map, &k, m);
                     true
                 }
                 _ => false,
@@ -773,6 +835,77 @@ impl Store {
         }
     }
 
+    // ── Set ───────────────────────────────────────────────────────────────
+
+    /// Add `member` to the set at `key` (creating it). Returns true if it was
+    /// new. `WrongType` if the key holds a non-set.
+    pub fn sadd(&self, key: &str, member: Vec<u8>) -> Result<bool, ListError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let rec = aof::rec_smember(aof::OP_SADD, key, &member);
+        let added = apply_sadd(&mut inner.map, key, member)?;
+        Self::journal(&mut inner, rec)?;
+        Ok(added)
+    }
+
+    /// Remove `member`. Returns true if it was present. An emptied set is removed.
+    pub fn srem(&self, key: &str, member: &[u8]) -> Result<bool, ListError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let removed = apply_srem(&mut inner.map, key, member)?;
+        if removed {
+            Self::journal(&mut inner, aof::rec_smember(aof::OP_SREM, key, member))?;
+        }
+        Ok(removed)
+    }
+
+    /// Whether `member` is in the set at `key`.
+    pub fn sismember(&self, key: &str, member: &[u8]) -> Result<bool, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Set(set) => Ok(set.contains(member)),
+                _ => Err(WrongType),
+            },
+            None => Ok(false),
+        }
+    }
+
+    /// All members (empty if missing). Order is unspecified. `WrongType` on a
+    /// non-set.
+    pub fn smembers(&self, key: &str) -> Result<Vec<Vec<u8>>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Set(set) => Ok(set.iter().cloned().collect()),
+                _ => Err(WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Cardinality — number of members (0 if missing). `WrongType` on a non-set.
+    pub fn scard(&self, key: &str) -> Result<u32, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::Set(set) => Ok(set.len() as u32),
+                _ => Err(WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
     // ── AOF maintenance ───────────────────────────────────────────────────
 
     /// Whether this store journals to a log.
@@ -824,6 +957,15 @@ impl Store {
                         records.push(aof::rec_hset(k, field, val));
                     }
                     // hset doesn't carry a TTL, so restore it explicitly.
+                    if let Some(exp) = e.expire_at {
+                        records.push(aof::rec_expire(k, exp));
+                    }
+                }
+                Value::Set(set) => {
+                    for member in set {
+                        records.push(aof::rec_smember(aof::OP_SADD, k, member));
+                    }
+                    // sadd doesn't carry a TTL, so restore it explicitly.
                     if let Some(exp) = e.expire_at {
                         records.push(aof::rec_expire(k, exp));
                     }
@@ -882,6 +1024,14 @@ impl Store {
                         buf.extend_from_slice(val);
                     }
                 }
+                Value::Set(set) => {
+                    buf.push(TYPE_SET);
+                    buf.extend_from_slice(&(set.len() as u32).to_le_bytes());
+                    for member in set {
+                        buf.extend_from_slice(&(member.len() as u32).to_le_bytes());
+                        buf.extend_from_slice(member);
+                    }
+                }
             }
         }
         let checksum = crc32(&buf);
@@ -889,7 +1039,7 @@ impl Store {
         buf
     }
 
-    /// Load a snapshot, replacing all current state. Accepts versions 1–4.
+    /// Load a snapshot, replacing all current state. Accepts versions 1–5.
     ///
     /// For v3 the trailing CRC is verified first, so a corrupted file is
     /// rejected instead of silently loading garbage.
@@ -993,6 +1143,18 @@ impl Store {
                         h.insert(field, body[at..at + vl].to_vec());
                     }
                     Value::Hash(h)
+                }
+                TYPE_SET => {
+                    let at = read(&mut p, 4)?;
+                    let n = u32_at(body, at) as usize;
+                    let mut set = HashSet::with_capacity(n);
+                    for _ in 0..n {
+                        let at = read(&mut p, 4)?;
+                        let ml = u32_at(body, at) as usize;
+                        let at = read(&mut p, ml)?;
+                        set.insert(body[at..at + ml].to_vec());
+                    }
+                    Value::Set(set)
                 }
                 _ => return Err(bad("unknown entry type in snapshot")),
             };
@@ -1484,6 +1646,108 @@ mod tests {
         assert_eq!(s3.hget("u:1", "counter").unwrap(), Some(b("99")));
         assert_eq!(s3.hlen("u:1"), Ok(2)); // name + counter
         assert!(s3.ttl("u:1") > 0);
+        s3.close().unwrap();
+    }
+
+    #[test]
+    fn set_basic_and_uniqueness() {
+        let s = Store::new();
+        assert!(s.sadd("tags", b("rust")).unwrap()); // new
+        assert!(!s.sadd("tags", b("rust")).unwrap()); // duplicate: no-op
+        assert!(s.sadd("tags", b("napi")).unwrap());
+        assert_eq!(s.scard("tags"), Ok(2));
+        assert!(s.sismember("tags", &b("rust")).unwrap());
+        assert!(!s.sismember("tags", &b("ghost")).unwrap());
+        assert!(!s.sismember("missing", &b("x")).unwrap());
+
+        let mut ms = s.smembers("tags").unwrap();
+        ms.sort();
+        assert_eq!(ms, vec![b("napi"), b("rust")]);
+    }
+
+    #[test]
+    fn set_srem_and_empty_key_removed() {
+        let s = Store::new();
+        s.sadd("s", b("a")).unwrap();
+        s.sadd("s", b("b")).unwrap();
+        assert!(s.srem("s", &b("a")).unwrap());
+        assert!(!s.srem("s", &b("a")).unwrap()); // already gone
+        assert_eq!(s.scard("s"), Ok(1));
+        assert!(s.srem("s", &b("b")).unwrap());
+        assert!(!s.exists("s")); // last member gone -> key deleted
+        assert_eq!(s.scard("s"), Ok(0));
+        assert!(s.smembers("s").unwrap().is_empty());
+        assert!(!s.srem("missing", &b("x")).unwrap());
+    }
+
+    #[test]
+    fn set_wrong_type() {
+        let s = Store::new();
+        s.set("str".into(), b("hola"), None).unwrap();
+        assert!(matches!(s.sadd("str", b("x")), Err(ListError::WrongType)));
+        assert!(matches!(s.srem("str", &b("x")), Err(ListError::WrongType)));
+        assert_eq!(s.sismember("str", &b("x")), Err(WrongType));
+        assert_eq!(s.smembers("str"), Err(WrongType));
+        assert_eq!(s.scard("str"), Err(WrongType));
+
+        // a set is not bytes/list/hash
+        s.sadd("st", b("m")).unwrap();
+        assert_eq!(s.get("st"), Err(WrongType));
+        assert!(matches!(
+            s.push_back("st", b("x")),
+            Err(ListError::WrongType)
+        ));
+        assert!(matches!(
+            s.hset("st", "f".into(), b("v")),
+            Err(ListError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn set_honors_ttl_and_snapshot() {
+        let s = Store::new();
+        s.sadd("online", b("u1")).unwrap();
+        s.sadd("online", b("u2")).unwrap();
+        assert!(s.expire("online", 60_000).unwrap());
+        let bytes = s.dump_bytes();
+
+        let fresh = Store::new();
+        fresh.load_bytes(&bytes).unwrap();
+        assert_eq!(fresh.scard("online"), Ok(2));
+        assert!(fresh.sismember("online", &b("u1")).unwrap());
+        assert!(fresh.ttl("online") > 0);
+    }
+
+    #[test]
+    fn set_aof_replay_and_compaction() {
+        let tmp = Tmp::new("set-aof");
+        {
+            let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+            s.sadd("seen", b("a")).unwrap();
+            s.sadd("seen", b("b")).unwrap();
+            s.srem("seen", &b("a")).unwrap();
+            // churn: re-adding the same member grows the log without growing the set
+            for _ in 0..100 {
+                s.sadd("seen", b("b")).unwrap();
+            }
+            s.sadd("seen", b("c")).unwrap();
+            s.close().unwrap();
+        }
+
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec.truncated);
+        assert!(!s2.sismember("seen", &b("a")).unwrap()); // removed stays removed
+        assert!(s2.sismember("seen", &b("b")).unwrap());
+        assert_eq!(s2.scard("seen"), Ok(2)); // {b, c}
+
+        let before = s2.aof_size();
+        s2.compact().unwrap();
+        assert!(s2.aof_size() < before);
+        s2.close().unwrap();
+
+        let (s3, _) = Store::with_aof(tmp.path(), false).unwrap();
+        assert_eq!(s3.scard("seen"), Ok(2));
+        assert!(s3.sismember("seen", &b("c")).unwrap());
         s3.close().unwrap();
     }
 }

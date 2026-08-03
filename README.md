@@ -266,6 +266,35 @@ db.hgetall('session:alice'); // { step: 'checkout', cart: ['book', 'pen'] }
 An emptied hash key is removed automatically. Operations on a non-hash key raise
 `WRONGTYPE`.
 
+### Sets (unique members)
+
+A set stores members with no duplicates — great for deduplication, "seen"
+tracking, or unique visitors. Members reuse the tagged format and codecs;
+uniqueness is by **exact serialized bytes**.
+
+| Method | Description |
+|---|---|
+| `sadd(key, member, opts?)` | Add; `true` if it was new |
+| `srem(key, member, opts?)` | Remove; `true` if it was present |
+| `sismember(key, member, opts?)` | Whether the member is in the set |
+| `smembers<T>(key)` | All members, decoded (order unspecified) |
+| `scard(key)` | Number of members (0 if missing) |
+
+```ts
+db.sadd('online', 'alice');
+db.sadd('online', 'alice'); // duplicate, ignored
+db.scard('online'); // 1
+```
+
+> [!NOTE]
+> Uniqueness compares serialized bytes. For strings, numbers, and buffers that is
+> exactly what you expect. For **objects**, two objects with the same content but
+> different key order count as different (`{a:1,b:2}` ≠ `{b:2,a:1}`). Use
+> primitive members for sets.
+
+An emptied set key is removed automatically. Operations on a non-set key raise
+`WRONGTYPE`.
+
 ### Counters
 
 Atomic integer counters — ideal for rate limits, message counts, and sequence
