@@ -31,6 +31,8 @@ pub(crate) const OP_HSET: u8 = 10;
 pub(crate) const OP_HDEL: u8 = 11;
 pub(crate) const OP_SADD: u8 = 12;
 pub(crate) const OP_SREM: u8 = 13;
+pub(crate) const OP_ZADD: u8 = 14;
+pub(crate) const OP_ZREM: u8 = 15;
 
 /// CRC-32 (IEEE), table-driven. Built at compile time — no dependency, no
 /// runtime init. Used for error detection only; this is not a hash for security.
@@ -122,6 +124,21 @@ pub(crate) fn rec_smember(op: u8, key: &str, member: &[u8]) -> Vec<u8> {
     p
 }
 
+pub(crate) fn rec_zadd(key: &str, score: f64, member: &[u8]) -> Vec<u8> {
+    let mut p = vec![OP_ZADD];
+    put_bytes(&mut p, key.as_bytes());
+    p.extend_from_slice(&score.to_le_bytes());
+    put_bytes(&mut p, member);
+    p
+}
+
+pub(crate) fn rec_zrem(key: &str, member: &[u8]) -> Vec<u8> {
+    let mut p = vec![OP_ZREM];
+    put_bytes(&mut p, key.as_bytes());
+    put_bytes(&mut p, member);
+    p
+}
+
 pub(crate) fn rec_clear() -> Vec<u8> {
     vec![OP_CLEAR]
 }
@@ -154,6 +171,14 @@ impl<'a> Cursor<'a> {
         }
         let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().ok()?);
         self.pos += 4;
+        Some(v)
+    }
+    pub fn f64(&mut self) -> Option<f64> {
+        if self.pos + 8 > self.data.len() {
+            return None;
+        }
+        let v = f64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().ok()?);
+        self.pos += 8;
         Some(v)
     }
     pub fn u64(&mut self) -> Option<u64> {

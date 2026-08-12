@@ -296,6 +296,32 @@ db.scard('online'); // 1
 Un set vacío se elimina automáticamente. Operaciones sobre una clave que no es set
 lanzan `WRONGTYPE`.
 
+### Sorted sets (rankings)
+
+Miembros ordenados por un score `f64` — la base de leaderboards y rankings. El
+motor conoce el score (para ordenar); el miembro sigue siendo un blob opaco con
+tag+codec, como en Redis.
+
+| Método | Descripción |
+|---|---|
+| `zadd(key, score, member, opts?)` | Agrega/actualiza; `true` si es nuevo |
+| `zincrby(key, delta, member, opts?)` | Suma al score; devuelve el nuevo score |
+| `zrem(key, member, opts?)` | Quita; `true` si estaba |
+| `zscore(key, member, opts?)` | Score del miembro, o `null` |
+| `zrank(key, member, opts?)` | Rank 0-based (menor score primero), o `null` |
+| `zcard(key)` | Cantidad de miembros |
+| `zrange<T>(key, start, stop)` | Miembros por rango de rank (negativos desde el final) |
+| `zrangeWithScores<T>(key, start, stop)` | Igual, como `{ member, score }[]` |
+
+```ts
+db.zadd('scores', 1500, 'alice');
+db.zincrby('scores', 400, 'bob');
+db.zrangeWithScores('scores', -3, -1).reverse(); // top 3
+```
+
+Un score `NaN` se rechaza. Los empates se ordenan por los bytes del miembro. Un
+sorted set vacío se elimina. Operaciones sobre otra estructura lanzan `WRONGTYPE`.
+
 ### Contadores
 
 Contadores enteros atómicos — ideales para rate limits, conteo de mensajes e IDs

@@ -42,6 +42,12 @@ export interface StrenorOptions {
   fsync?: boolean;
 }
 
+/** A member of a sorted set together with its numeric score. */
+export interface ScoredMember<T = unknown> {
+  member: T;
+  score: number;
+}
+
 /** What replaying the log on open found. `null` when there is no log. */
 export interface Recovery {
   /** Records applied from the log. */
@@ -361,6 +367,53 @@ export class Strenor {
   /** Number of members in the set at `key` (0 if missing). */
   scard(key: string): number {
     return this.db.scard(key);
+  }
+
+  // ---- sorted sets (rankings & leaderboards) ----
+
+  /** Add/update `member` with `score`. Returns true if the member is new. */
+  zadd(key: string, score: number, member: unknown, opts?: WriteOptions): boolean {
+    return this.db.zadd(key, score, this.encode(member, opts));
+  }
+
+  /** Add `delta` to a member's score (creating it at `delta`). Returns the new score. */
+  zincrby(key: string, delta: number, member: unknown, opts?: WriteOptions): number {
+    return this.db.zincrby(key, delta, this.encode(member, opts));
+  }
+
+  /** Remove `member`. Returns true if it was present. An emptied key is removed. */
+  zrem(key: string, member: unknown, opts?: WriteOptions): boolean {
+    return this.db.zrem(key, this.encode(member, opts));
+  }
+
+  /** The score of `member`, or `null` if the member/key is missing. */
+  zscore(key: string, member: unknown, opts?: WriteOptions): number | null {
+    return this.db.zscore(key, this.encode(member, opts));
+  }
+
+  /** 0-based rank of `member` (low score first), or `null` if missing. */
+  zrank(key: string, member: unknown, opts?: WriteOptions): number | null {
+    return this.db.zrank(key, this.encode(member, opts));
+  }
+
+  /** Number of members in the sorted set at `key` (0 if missing). */
+  zcard(key: string): number {
+    return this.db.zcard(key);
+  }
+
+  /** Members in rank range `[start, stop]`, low score first (negative from end). */
+  zrange<T = unknown>(key: string, start: number, stop: number): T[] {
+    return this.db.zrange(key, start, stop).map((b) => this.decode(b) as T);
+  }
+
+  /** Same as `zrange`, but each element is `{ member, score }`. */
+  zrangeWithScores<T = unknown>(key: string, start: number, stop: number): ScoredMember<T>[] {
+    const flat = this.db.zrangeWithScores(key, start, stop); // [m0, s0, m1, s1, …]
+    const out: ScoredMember<T>[] = [];
+    for (let i = 0; i < flat.length; i += 2) {
+      out.push({ member: this.decode(flat[i]) as T, score: Number(flat[i + 1].toString('utf8')) });
+    }
+    return out;
   }
 
   // ---- durability (append-only log) ----

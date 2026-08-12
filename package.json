@@ -1,6 +1,6 @@
 {
   "name": "strenor",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Embedded high-performance key-value store for Node.js, powered by Rust. In-process, no server, no config.",
   "type": "module",
   "main": "dist/index.cjs",
@@ -46,7 +46,7 @@
     "example:cache": "node examples/cache.mjs",
     "example:session": "node examples/session-store.mjs",
     "example:codec": "node examples/codec.mjs",
-    "examples": "npm run example:basic && npm run example:cache && npm run example:session && npm run example:codec && npm run example:queue && npm run example:durability && npm run example:hash && npm run example:set",
+    "examples": "npm run example:basic && npm run example:cache && npm run example:session && npm run example:codec && npm run example:queue && npm run example:durability && npm run example:hash && npm run example:set && npm run example:leaderboard",
     "create-npm-dirs": "napi create-npm-dir -t .",
     "test:rust": "cargo test -p strenor-store",
     "clippy": "cargo clippy --workspace --all-targets -- -D warnings",
@@ -56,7 +56,8 @@
     "pretest": "npm run build:native",
     "pretest:coverage": "npm run build:native",
     "example:hash": "node examples/hash.mjs",
-    "example:set": "node examples/set.mjs"
+    "example:set": "node examples/set.mjs",
+    "example:leaderboard": "node examples/leaderboard.mjs"
   },
   "keywords": ["kv", "key-value", "cache", "embedded", "in-memory", "rust", "napi", "store", "ttl"],
   "author": "Hepein Oficial (Brashkie)",
@@ -102,15 +103,15 @@
     }
   },
   "optionalDependencies": {
-    "@strenor/binary-win32-x64-msvc": "0.3.1",
-    "@strenor/binary-darwin-x64": "0.3.1",
-    "@strenor/binary-linux-x64-gnu": "0.3.1",
-    "@strenor/binary-linux-x64-musl": "0.3.1",
-    "@strenor/binary-linux-arm64-gnu": "0.3.1",
-    "@strenor/binary-linux-arm64-musl": "0.3.1",
-    "@strenor/binary-darwin-arm64": "0.3.1",
-    "@strenor/binary-win32-arm64-msvc": "0.3.1",
-    "@strenor/binary-android-arm64": "0.3.1",
-    "@strenor/binary-android-arm-eabi": "0.3.1"
+    "@strenor/binary-win32-x64-msvc": "0.3.2",
+    "@strenor/binary-darwin-x64": "0.3.2",
+    "@strenor/binary-linux-x64-gnu": "0.3.2",
+    "@strenor/binary-linux-x64-musl": "0.3.2",
+    "@strenor/binary-linux-arm64-gnu": "0.3.2",
+    "@strenor/binary-linux-arm64-musl": "0.3.2",
+    "@strenor/binary-darwin-arm64": "0.3.2",
+    "@strenor/binary-win32-arm64-msvc": "0.3.2",
+    "@strenor/binary-android-arm64": "0.3.2",
+    "@strenor/binary-android-arm-eabi": "0.3.2"
   }
 }

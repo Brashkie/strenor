@@ -295,6 +295,32 @@ db.scard('online'); // 1
 An emptied set key is removed automatically. Operations on a non-set key raise
 `WRONGTYPE`.
 
+### Sorted sets (rankings)
+
+Members ranked by an `f64` score — the basis of leaderboards. The engine knows
+the score (to order by it); the member stays an opaque tagged+codec blob, like
+Redis.
+
+| Method | Description |
+|---|---|
+| `zadd(key, score, member, opts?)` | Add/update; `true` if new |
+| `zincrby(key, delta, member, opts?)` | Add to the score; returns the new score |
+| `zrem(key, member, opts?)` | Remove; `true` if present |
+| `zscore(key, member, opts?)` | The member's score, or `null` |
+| `zrank(key, member, opts?)` | 0-based rank (low score first), or `null` |
+| `zcard(key)` | Number of members |
+| `zrange<T>(key, start, stop)` | Members by rank range (negative from the end) |
+| `zrangeWithScores<T>(key, start, stop)` | Same, as `{ member, score }[]` |
+
+```ts
+db.zadd('scores', 1500, 'alice');
+db.zincrby('scores', 400, 'bob');
+db.zrangeWithScores('scores', -3, -1).reverse(); // top 3
+```
+
+A `NaN` score is rejected. Ties break by member bytes. An emptied sorted-set key
+is removed. Operations on another structure raise `WRONGTYPE`.
+
 ### Counters
 
 Atomic integer counters — ideal for rate limits, message counts, and sequence

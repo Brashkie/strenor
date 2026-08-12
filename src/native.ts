@@ -43,6 +43,14 @@ export interface NativeStrenorInstance {
   sismember(key: string, member: Buffer): boolean;
   smembers(key: string): Buffer[];
   scard(key: string): number;
+  zadd(key: string, score: number, member: Buffer): boolean;
+  zincrby(key: string, delta: number, member: Buffer): number;
+  zrem(key: string, member: Buffer): boolean;
+  zscore(key: string, member: Buffer): number | null;
+  zrank(key: string, member: Buffer): number | null;
+  zcard(key: string): number;
+  zrange(key: string, start: number, stop: number): Buffer[];
+  zrangeWithScores(key: string, start: number, stop: number): Buffer[];
   close(): void;
   hasAof(): boolean;
   aofSize(): number;

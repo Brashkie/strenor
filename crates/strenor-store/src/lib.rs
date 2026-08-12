@@ -14,6 +14,9 @@
 //! mutation is journalled and replayed on startup.
 
 mod aof;
+mod zset;
+
+use zset::{Scored, ZSet};
 
 use aof::Aof;
 pub use aof::{crc32, write_atomic};
@@ -28,15 +31,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// - v3: adds a trailing CRC-32 over the body (corruption detection).
 /// - v4: adds the hash structure type.
 /// - v5: adds the set structure type.
+/// - v6: adds the sorted-set structure type.
 ///
 /// Older versions still load, so existing snapshots keep working.
 pub const MAGIC: &[u8; 4] = b"STRN";
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 
 const TYPE_BYTES: u8 = 0;
 const TYPE_LIST: u8 = 1;
 const TYPE_HASH: u8 = 2;
 const TYPE_SET: u8 = 3;
+const TYPE_ZSET: u8 = 4;
 
 /// A structure-typed value. The engine distinguishes these; it never looks
 /// inside a blob. New engine structures (Hash, Set, SortedSet) will be added
@@ -46,6 +51,7 @@ enum Value {
     List(VecDeque<Vec<u8>>),
     Hash(HashMap<String, Vec<u8>>),
     Set(HashSet<Vec<u8>>),
+    ZSet(ZSet),
 }
 
 /// A stored record: a typed value plus an optional expiration (TTL applies to
@@ -261,6 +267,56 @@ fn apply_srem(
     }
 }
 
+/// Score rejected because it is NaN or the result is non-finite.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BadScore;
+
+fn apply_zadd(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    score: f64,
+    member: Vec<u8>,
+) -> Result<bool, ZAddError> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::ZSet(z) => z.add(member, score).map_err(|_| ZAddError::BadScore),
+            _ => Err(ZAddError::WrongType),
+        },
+        None => {
+            let mut z = ZSet::new();
+            let is_new = z.add(member, score).map_err(|_| ZAddError::BadScore)?;
+            map.insert(
+                key.to_string(),
+                Entry {
+                    value: Value::ZSet(z),
+                    expire_at: None,
+                },
+            );
+            Ok(is_new)
+        }
+    }
+}
+
+fn apply_zrem(
+    map: &mut HashMap<String, Entry>,
+    key: &str,
+    member: &[u8],
+) -> Result<bool, WrongType> {
+    match map.get_mut(key) {
+        Some(e) => match &mut e.value {
+            Value::ZSet(z) => {
+                let removed = z.remove(member);
+                if z.is_empty() {
+                    map.remove(key); // an empty zset key is deleted (Redis-like)
+                }
+                Ok(removed)
+            }
+            _ => Err(WrongType),
+        },
+        None => Ok(false),
+    }
+}
+
 fn apply_pop(
     map: &mut HashMap<String, Entry>,
     key: &str,
@@ -416,6 +472,20 @@ impl Store {
             aof::OP_SREM => match (c.string(), c.bytes()) {
                 (Some(k), Some(m)) => {
                     let _ = apply_srem(map, &k, m);
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_ZADD => match (c.string(), c.f64(), c.bytes()) {
+                (Some(k), Some(score), Some(m)) => {
+                    let _ = apply_zadd(map, &k, score, m.to_vec());
+                    true
+                }
+                _ => false,
+            },
+            aof::OP_ZREM => match (c.string(), c.bytes()) {
+                (Some(k), Some(m)) => {
+                    let _ = apply_zrem(map, &k, m);
                     true
                 }
                 _ => false,
@@ -906,6 +976,145 @@ impl Store {
         }
     }
 
+    // ── Sorted set ────────────────────────────────────────────────────────
+
+    /// Add or update `member` with `score` (creating the zset). Returns true if
+    /// the member is new. `WrongType` on a non-zset, `BadScore` if `score` is NaN.
+    pub fn zadd(&self, key: &str, score: f64, member: Vec<u8>) -> Result<bool, ZAddError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let rec = aof::rec_zadd(key, score, &member);
+        let is_new = apply_zadd(&mut inner.map, key, score, member)?;
+        Self::journal(&mut inner, rec)?;
+        Ok(is_new)
+    }
+
+    /// Add `delta` to a member's score (creating it at `delta`). Returns the new
+    /// score. `WrongType` on a non-zset, `BadScore` on a non-finite result.
+    pub fn zincrby(&self, key: &str, delta: f64, member: Vec<u8>) -> Result<f64, ZAddError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let new_score = match inner.map.get_mut(key) {
+            Some(e) => match &mut e.value {
+                Value::ZSet(z) => z
+                    .incr_by(member.clone(), delta)
+                    .map_err(|_| ZAddError::BadScore)?,
+                _ => return Err(ZAddError::WrongType),
+            },
+            None => {
+                if delta.is_nan() {
+                    return Err(ZAddError::BadScore);
+                }
+                let mut z = ZSet::new();
+                z.add(member.clone(), delta)
+                    .map_err(|_| ZAddError::BadScore)?;
+                inner.map.insert(
+                    key.to_string(),
+                    Entry {
+                        value: Value::ZSet(z),
+                        expire_at: None,
+                    },
+                );
+                delta
+            }
+        };
+        // Journal the resulting absolute score so replay is deterministic.
+        Self::journal(&mut inner, aof::rec_zadd(key, new_score, &member))?;
+        Ok(new_score)
+    }
+
+    /// Remove `member`. Returns true if present. An emptied zset key is removed.
+    pub fn zrem(&self, key: &str, member: &[u8]) -> Result<bool, ListError> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        self.hash_expired(&mut inner, key, now);
+        let removed = apply_zrem(&mut inner.map, key, member)?;
+        if removed {
+            Self::journal(&mut inner, aof::rec_zrem(key, member))?;
+        }
+        Ok(removed)
+    }
+
+    /// The score of `member`, or `None` if the member/key is missing.
+    pub fn zscore(&self, key: &str, member: &[u8]) -> Result<Option<f64>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::ZSet(z) => Ok(z.score(member)),
+                _ => Err(WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// 0-based rank of `member` (low score first), or `None` if missing.
+    pub fn zrank(&self, key: &str, member: &[u8]) -> Result<Option<u32>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::ZSet(z) => Ok(z.rank(member)),
+                _ => Err(WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Cardinality — number of members (0 if missing). `WrongType` on a non-zset.
+    pub fn zcard(&self, key: &str) -> Result<u32, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::ZSet(z) => Ok(z.len() as u32),
+                _ => Err(WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    /// Members in the inclusive rank range `[start, stop]`, low score first.
+    pub fn zrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<Vec<u8>>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::ZSet(z) => Ok(z.range(start, stop)),
+                _ => Err(WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Same as `zrange`, but each element carries its score.
+    pub fn zrange_scored(
+        &self,
+        key: &str,
+        start: i64,
+        stop: i64,
+    ) -> Result<Vec<Scored>, WrongType> {
+        let now = now_ms();
+        let mut inner = self.inner.lock();
+        self.hash_expired(&mut inner, key, now);
+        match inner.map.get(key) {
+            Some(e) => match &e.value {
+                Value::ZSet(z) => Ok(z.range_scored(start, stop)),
+                _ => Err(WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
     // ── AOF maintenance ───────────────────────────────────────────────────
 
     /// Whether this store journals to a log.
@@ -966,6 +1175,15 @@ impl Store {
                         records.push(aof::rec_smember(aof::OP_SADD, k, member));
                     }
                     // sadd doesn't carry a TTL, so restore it explicitly.
+                    if let Some(exp) = e.expire_at {
+                        records.push(aof::rec_expire(k, exp));
+                    }
+                }
+                Value::ZSet(z) => {
+                    for (member, score) in z.entries() {
+                        records.push(aof::rec_zadd(k, score, member));
+                    }
+                    // zadd doesn't carry a TTL, so restore it explicitly.
                     if let Some(exp) = e.expire_at {
                         records.push(aof::rec_expire(k, exp));
                     }
@@ -1032,6 +1250,15 @@ impl Store {
                         buf.extend_from_slice(member);
                     }
                 }
+                Value::ZSet(z) => {
+                    buf.push(TYPE_ZSET);
+                    buf.extend_from_slice(&(z.len() as u32).to_le_bytes());
+                    for (member, score) in z.entries() {
+                        buf.extend_from_slice(&score.to_le_bytes());
+                        buf.extend_from_slice(&(member.len() as u32).to_le_bytes());
+                        buf.extend_from_slice(member);
+                    }
+                }
             }
         }
         let checksum = crc32(&buf);
@@ -1039,7 +1266,7 @@ impl Store {
         buf
     }
 
-    /// Load a snapshot, replacing all current state. Accepts versions 1–5.
+    /// Load a snapshot, replacing all current state. Accepts versions 1–6.
     ///
     /// For v3 the trailing CRC is verified first, so a corrupted file is
     /// rejected instead of silently loading garbage.
@@ -1156,6 +1383,21 @@ impl Store {
                     }
                     Value::Set(set)
                 }
+                TYPE_ZSET => {
+                    let at = read(&mut p, 4)?;
+                    let n = u32_at(body, at) as usize;
+                    let mut z = ZSet::new();
+                    for _ in 0..n {
+                        let at = read(&mut p, 8)?;
+                        let score = f64::from_le_bytes(body[at..at + 8].try_into().unwrap());
+                        let at = read(&mut p, 4)?;
+                        let ml = u32_at(body, at) as usize;
+                        let at = read(&mut p, ml)?;
+                        // Snapshots only ever contain finite scores, so this can't fail.
+                        let _ = z.add(body[at..at + ml].to_vec(), score);
+                    }
+                    Value::ZSet(z)
+                }
                 _ => return Err(bad("unknown entry type in snapshot")),
             };
 
@@ -1191,6 +1433,31 @@ impl std::fmt::Display for ListError {
         match self {
             ListError::WrongType => write!(f, "WRONGTYPE"),
             ListError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// `zadd`/`zincrby` can fail on the structure type, on a bad score (NaN or a
+/// non-finite result), or on journalling.
+#[derive(Debug)]
+pub enum ZAddError {
+    WrongType,
+    BadScore,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for ZAddError {
+    fn from(e: std::io::Error) -> Self {
+        ZAddError::Io(e)
+    }
+}
+
+impl std::fmt::Display for ZAddError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZAddError::WrongType => write!(f, "WRONGTYPE"),
+            ZAddError::BadScore => write!(f, "score is not a valid number"),
+            ZAddError::Io(e) => write!(f, "{e}"),
         }
     }
 }
@@ -1749,5 +2016,105 @@ mod tests {
         assert_eq!(s3.scard("seen"), Ok(2));
         assert!(s3.sismember("seen", &b("c")).unwrap());
         s3.close().unwrap();
+    }
+
+    #[test]
+    fn zset_ordering_and_queries() {
+        let s = Store::new();
+        assert!(matches!(s.zadd("lb", 50.0, b("bob")), Ok(true)));
+        assert!(matches!(s.zadd("lb", 100.0, b("alice")), Ok(true)));
+        assert!(matches!(s.zadd("lb", 10.0, b("carol")), Ok(true)));
+        assert!(matches!(s.zadd("lb", 75.0, b("bob")), Ok(false))); // update
+
+        assert_eq!(s.zcard("lb"), Ok(3));
+        assert_eq!(s.zscore("lb", &b("bob")).unwrap(), Some(75.0));
+        assert_eq!(s.zscore("lb", &b("ghost")).unwrap(), None);
+        assert_eq!(
+            s.zrange("lb", 0, -1),
+            Ok(vec![b("carol"), b("bob"), b("alice")])
+        );
+        assert_eq!(s.zrank("lb", &b("carol")).unwrap(), Some(0));
+        assert_eq!(s.zrank("lb", &b("alice")).unwrap(), Some(2));
+
+        let top = s.zrange_scored("lb", -1, -1).unwrap();
+        assert_eq!(top[0].member, b("alice"));
+        assert_eq!(top[0].score, 100.0);
+    }
+
+    #[test]
+    fn zset_incrby_and_rem() {
+        let s = Store::new();
+        assert_eq!(s.zincrby("lb", 5.0, b("p")).unwrap(), 5.0); // created at delta
+        assert_eq!(s.zincrby("lb", 3.0, b("p")).unwrap(), 8.0);
+        assert!(s.zrem("lb", &b("p")).unwrap());
+        assert!(!s.zrem("lb", &b("p")).unwrap());
+        assert!(!s.exists("lb")); // emptied -> removed
+        assert_eq!(s.zcard("lb"), Ok(0));
+        assert_eq!(s.zrange("lb", 0, -1), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn zset_rejects_nan() {
+        let s = Store::new();
+        assert!(matches!(
+            s.zadd("z", f64::NAN, b("x")),
+            Err(ZAddError::BadScore)
+        ));
+    }
+
+    #[test]
+    fn zset_wrong_type() {
+        let s = Store::new();
+        s.set("str".into(), b("hola"), None).unwrap();
+        assert!(matches!(
+            s.zadd("str", 1.0, b("x")),
+            Err(ZAddError::WrongType)
+        ));
+        assert!(matches!(
+            s.zincrby("str", 1.0, b("x")),
+            Err(ZAddError::WrongType)
+        ));
+        assert!(matches!(s.zrem("str", &b("x")), Err(ListError::WrongType)));
+        assert_eq!(s.zscore("str", &b("x")), Err(WrongType));
+        assert_eq!(s.zrank("str", &b("x")), Err(WrongType));
+        assert_eq!(s.zcard("str"), Err(WrongType));
+        assert_eq!(s.zrange("str", 0, -1), Err(WrongType));
+        assert_eq!(s.zrange_scored("str", 0, -1), Err(WrongType));
+
+        s.zadd("z", 1.0, b("m")).unwrap();
+        assert_eq!(s.get("z"), Err(WrongType));
+    }
+
+    #[test]
+    fn zset_snapshot_and_aof() {
+        let tmp = Tmp::new("zset-aof");
+        {
+            let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+            s.zadd("lb", 100.0, b("alice")).unwrap();
+            s.zadd("lb", 50.0, b("bob")).unwrap();
+            for _ in 0..100 {
+                s.zincrby("lb", 1.0, b("bob")).unwrap(); // churn: 50 -> 150
+            }
+            s.expire("lb", 60_000).unwrap();
+            s.close().unwrap();
+        }
+
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec.truncated);
+        assert_eq!(s2.zscore("lb", &b("bob")).unwrap(), Some(150.0));
+        assert_eq!(s2.zrange("lb", 0, -1), Ok(vec![b("alice"), b("bob")])); // bob now leads
+        assert!(s2.ttl("lb") > 0);
+
+        // snapshot roundtrip preserves scores + order
+        let bytes = s2.dump_bytes();
+        let fresh = Store::new();
+        fresh.load_bytes(&bytes).unwrap();
+        assert_eq!(fresh.zscore("lb", &b("bob")).unwrap(), Some(150.0));
+        assert_eq!(fresh.zrank("lb", &b("bob")).unwrap(), Some(1));
+
+        let before = s2.aof_size();
+        s2.compact().unwrap();
+        assert!(s2.aof_size() < before);
+        s2.close().unwrap();
     }
 }

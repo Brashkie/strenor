@@ -7,7 +7,7 @@ use napi::bindgen_prelude::Buffer;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use std::path::Path;
-use strenor_store::{write_atomic, ListError, Store, WrongType};
+use strenor_store::{write_atomic, ListError, Store, WrongType, ZAddError};
 
 const WRONGTYPE_MSG: &str = "WRONGTYPE Operation against a key holding the wrong kind of value";
 
@@ -37,6 +37,18 @@ fn list_err(e: ListError) -> Error {
     match e {
         ListError::WrongType => Error::new(Status::GenericFailure, WRONGTYPE_MSG),
         ListError::Io(err) => io_err(err),
+    }
+}
+
+/// Map a zadd/zincrby failure: wrong structure type, a bad (NaN/non-finite)
+/// score, or an IO error while journalling.
+fn zadd_err(e: ZAddError) -> Error {
+    match e {
+        ZAddError::WrongType => Error::new(Status::GenericFailure, WRONGTYPE_MSG),
+        ZAddError::BadScore => {
+            Error::new(Status::InvalidArg, "strenor: score is not a valid number")
+        }
+        ZAddError::Io(err) => io_err(err),
     }
 }
 
@@ -269,6 +281,68 @@ impl Strenor {
     #[napi]
     pub fn scard(&self, key: String) -> Result<u32> {
         self.store.scard(&key).map_err(wrongtype)
+    }
+
+    // ── Sorted set ────────────────────────────────────────────────────────
+
+    #[napi]
+    pub fn zadd(&self, key: String, score: f64, member: Buffer) -> Result<bool> {
+        self.store
+            .zadd(&key, score, member.to_vec())
+            .map_err(zadd_err)
+    }
+
+    #[napi]
+    pub fn zincrby(&self, key: String, delta: f64, member: Buffer) -> Result<f64> {
+        self.store
+            .zincrby(&key, delta, member.to_vec())
+            .map_err(zadd_err)
+    }
+
+    #[napi]
+    pub fn zrem(&self, key: String, member: Buffer) -> Result<bool> {
+        self.store.zrem(&key, &member).map_err(list_err)
+    }
+
+    #[napi]
+    pub fn zscore(&self, key: String, member: Buffer) -> Result<Option<f64>> {
+        self.store.zscore(&key, &member).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn zrank(&self, key: String, member: Buffer) -> Result<Option<u32>> {
+        self.store.zrank(&key, &member).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn zcard(&self, key: String) -> Result<u32> {
+        self.store.zcard(&key).map_err(wrongtype)
+    }
+
+    #[napi]
+    pub fn zrange(&self, key: String, start: i64, stop: i64) -> Result<Vec<Buffer>> {
+        self.store
+            .zrange(&key, start, stop)
+            .map(|v| v.into_iter().map(Buffer::from).collect())
+            .map_err(wrongtype)
+    }
+
+    /// Returns a flat `[member0, score0, member1, score1, …]`; scores are the
+    /// `f64` re-encoded as text so they cross NAPI without a struct. The TS layer
+    /// pairs and decodes them.
+    #[napi]
+    pub fn zrange_with_scores(&self, key: String, start: i64, stop: i64) -> Result<Vec<Buffer>> {
+        self.store
+            .zrange_scored(&key, start, stop)
+            .map(|v| {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for s in v {
+                    out.push(Buffer::from(s.member));
+                    out.push(Buffer::from(s.score.to_string().into_bytes()));
+                }
+                out
+            })
+            .map_err(wrongtype)
     }
 
     // ── AOF ───────────────────────────────────────────────────────────────

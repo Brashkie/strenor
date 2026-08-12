@@ -405,6 +405,70 @@ describe('Strenor', () => {
     });
   });
 
+  describe('sorted sets', () => {
+    it('orders by score and supports zscore/zrank/zcard', () => {
+      expect(db.zadd('lb', 50, 'bob')).toBe(true);
+      expect(db.zadd('lb', 100, 'alice')).toBe(true);
+      db.zadd('lb', 10, 'carol');
+      expect(db.zadd('lb', 75, 'bob')).toBe(false); // update
+      expect(db.zcard('lb')).toBe(3);
+      expect(db.zscore('lb', 'bob')).toBe(75);
+      expect(db.zscore('lb', 'ghost')).toBeNull();
+      expect(db.zrange('lb', 0, -1)).toEqual(['carol', 'bob', 'alice']);
+      expect(db.zrank('lb', 'carol')).toBe(0);
+      expect(db.zrank('lb', 'alice')).toBe(2);
+      expect(db.zrank('lb', 'ghost')).toBeNull();
+    });
+
+    it('zrangeWithScores returns members and scores', () => {
+      db.zadd('lb', 100, 'alice');
+      db.zadd('lb', 50, 'bob');
+      expect(db.zrangeWithScores('lb', 0, -1)).toEqual([
+        { member: 'bob', score: 50 },
+        { member: 'alice', score: 100 },
+      ]);
+      expect(db.zrangeWithScores('missing', 0, -1)).toEqual([]);
+      expect(db.zrange('missing', 0, -1)).toEqual([]);
+      expect(db.zcard('missing')).toBe(0);
+      expect(db.zscore('missing', 'x')).toBeNull();
+      expect(db.zrank('missing', 'x')).toBeNull();
+    });
+
+    it('zincrby and zrem', () => {
+      expect(db.zincrby('lb', 5, 'p')).toBe(5); // created at delta
+      expect(db.zincrby('lb', 3, 'p')).toBe(8);
+      expect(db.zrem('lb', 'p')).toBe(true);
+      expect(db.zrem('lb', 'p')).toBe(false);
+      expect(db.exists('lb')).toBe(false); // emptied -> removed
+    });
+
+    it('rejects a NaN score', () => {
+      expect(() => db.zadd('lb', Number.NaN, 'x')).toThrow(/score/);
+    });
+
+    it('throws WRONGTYPE on mismatched operations', () => {
+      db.set('str', 'hola');
+      expect(() => db.zadd('str', 1, 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.zincrby('str', 1, 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.zrem('str', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.zscore('str', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.zrank('str', 'x')).toThrow(/WRONGTYPE/);
+      expect(() => db.zcard('str')).toThrow(/WRONGTYPE/);
+      expect(() => db.zrange('str', 0, -1)).toThrow(/WRONGTYPE/);
+      expect(() => db.zrangeWithScores('str', 0, -1)).toThrow(/WRONGTYPE/);
+    });
+
+    it('survives a snapshot round-trip with scores intact', () => {
+      db.zadd('lb', 100, 'alice');
+      db.zadd('lb', 50, 'bob');
+      db.dump(SNAP);
+      const fresh = new Strenor();
+      fresh.load(SNAP);
+      expect(fresh.zrange('lb', 0, -1)).toEqual(['bob', 'alice']);
+      expect(fresh.zscore('lb', 'alice')).toBe(100);
+    });
+  });
+
   describe('durability (append-only log)', () => {
     const AOF = './test.aof.tmp';
     const clean = () => {

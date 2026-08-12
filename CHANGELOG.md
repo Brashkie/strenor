@@ -6,6 +6,22 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-03
+
+Completes the v0.3.x data structures.
+
+### Added
+
+- **Sorted sets** (members ranked by score): `zadd`, `zincrby`, `zrem`, `zscore`,
+  `zrank`, `zcard`, `zrange`, `zrangeWithScores`. Scores are `f64` and ordered in
+  the engine (NaN rejected); members reuse the tagged format and codecs. Ties
+  break by member bytes. Journalled to the AOF and included in snapshots; an
+  emptied sorted-set key is removed.
+
+### Changed
+
+- Snapshot format bumped to v6 (adds the sorted-set type); v1–v5 snapshots still load.
+
 ## [0.3.1] - 2026-08-02
 
 ### Added
@@ -122,7 +138,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Brashkie/strenor/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Brashkie/strenor/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Brashkie/strenor/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Brashkie/strenor/compare/v0.1.0...v0.2.0
