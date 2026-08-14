@@ -68,7 +68,7 @@ Grow the type set — the useful subset of Redis, not all of it.
 - `bitset`, optional bloom filter — planned.
 - Built-in MsgPack and CBOR codecs — planned.
 
-### v0.4.x — Transactions · **planned**
+### v0.4.x — Transactions · **shipped**
 
 Something many embedded stores don't get right.
 

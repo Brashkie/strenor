@@ -246,6 +246,31 @@ impl Aof {
         Ok(())
     }
 
+    /// Append many records in one pass: a single write buffer, one flush, one
+    /// optional fsync. Used to journal a whole transaction/batch atomically —
+    /// faster than N separate `append`s, and every record is individually framed
+    /// and CRC'd so a torn tail still recovers cleanly.
+    pub fn append_batch(&mut self, payloads: &[Vec<u8>]) -> io::Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let total: usize = payloads.iter().map(|p| p.len() + 8).sum();
+        let mut buf = Vec::with_capacity(total);
+        for payload in payloads {
+            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&crc32(payload).to_le_bytes());
+            buf.extend_from_slice(payload);
+        }
+        let fsync = self.fsync;
+        let file = self.handle()?;
+        file.write_all(&buf)?;
+        file.flush()?;
+        if fsync {
+            file.get_ref().sync_data()?;
+        }
+        Ok(())
+    }
+
     /// Rewrite the log from scratch with `records` (compaction). Writes to a
     /// temp file and renames, so a crash never leaves a half-written log.
     pub fn rewrite(&mut self, records: &[Vec<u8>]) -> io::Result<()> {

@@ -469,6 +469,74 @@ describe('Strenor', () => {
     });
   });
 
+  describe('transactions', () => {
+    it('commits all writes when the callback returns', () => {
+      db.set('balance', 100);
+      const result = db.transaction(() => {
+        db.set('balance', 90);
+        db.hset('orders', 'o1', { item: 'book' });
+        db.zadd('lb', 10, 'alice');
+        return 'done';
+      });
+      expect(result).toBe('done');
+      expect(db.get('balance')).toBe(90);
+      expect(db.hget('orders', 'o1')).toEqual({ item: 'book' });
+      expect(db.zscore('lb', 'alice')).toBe(10);
+      expect(db.inTransaction).toBe(false);
+    });
+
+    it('rolls everything back when the callback throws', () => {
+      db.set('balance', 100);
+      db.hset('h', 'keep', 'v');
+      expect(() =>
+        db.transaction(() => {
+          db.set('balance', 0);
+          db.set('new', 'x');
+          db.hdel('h', 'keep');
+          throw new Error('abort');
+        })
+      ).toThrow('abort');
+
+      expect(db.get('balance')).toBe(100); // reverted
+      expect(db.get('new')).toBeNull(); // never added
+      expect(db.hget('h', 'keep')).toBe('v'); // field restored
+      expect(db.inTransaction).toBe(false);
+    });
+
+    it('batch commits staged writes even if the callback throws', () => {
+      expect(() =>
+        db.batch(() => {
+          db.set('a', 1);
+          db.set('b', 2);
+          throw new Error('partial');
+        })
+      ).toThrow('partial');
+      // batch has no rollback: writes before the throw persist
+      expect(db.get('a')).toBe(1);
+      expect(db.get('b')).toBe(2);
+      expect(db.inTransaction).toBe(false);
+    });
+
+    it('persists a committed transaction across a restart', () => {
+      const AOF = './test.tx.aof.tmp';
+      try {
+        const first = new Strenor({ aof: AOF });
+        first.transaction(() => {
+          first.set('x', 1);
+          first.set('y', 2);
+        });
+        first.close();
+
+        const second = new Strenor({ aof: AOF });
+        expect(second.get('x')).toBe(1);
+        expect(second.get('y')).toBe(2);
+        second.close();
+      } finally {
+        if (existsSync(AOF)) rmSync(AOF, { force: true });
+      }
+    });
+  });
+
   describe('durability (append-only log)', () => {
     const AOF = './test.aof.tmp';
     const clean = () => {

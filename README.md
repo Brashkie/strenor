@@ -367,6 +367,33 @@ db.dequeue('jobs'); //            -> { id: 1 }  (FIFO)
 db.llen('jobs'); //               -> 1
 ```
 
+## Transactions
+
+`transaction(fn)` runs a block **all-or-nothing**. State is snapshotted up front;
+if `fn` throws, everything is rolled back and nothing reaches the log; if it
+returns, all writes commit as one atomic batch.
+
+```ts
+db.transaction(() => {
+  const balance = db.get('alice');
+  if (balance < amount) throw new Error('insufficient funds'); // rolls back all
+  db.set('alice', balance - amount);
+  db.set('bob', db.get('bob') + amount);
+});
+```
+
+| Member | Description |
+|---|---|
+| `transaction<T>(fn)` | All-or-nothing; rolls back if `fn` throws, commits if it returns |
+| `batch<T>(fn)` | Groups writes into one journal pass, **no** rollback |
+| `inTransaction` | Whether a transaction/batch is open |
+
+`batch(fn)` is like `transaction` without the rollback snapshot: faster for bulk
+writes, but if `fn` throws, whatever already ran stays written.
+
+Transactions can't be nested. The rollback snapshot is O(state size) — meant for
+thousands of keys, not millions. It's **synchronous**: don't `await` inside `fn`.
+
 ## Durability
 
 By default Strenor is memory-only (with `dump`/`load` for snapshots). Point it at

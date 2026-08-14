@@ -345,6 +345,30 @@ impl Strenor {
             .map_err(wrongtype)
     }
 
+    // ── Transactions ──────────────────────────────────────────────────────
+
+    /// Begin a transaction: snapshot state, stage journal records. The JS layer
+    /// wraps this with commit/rollback around a callback.
+    #[napi]
+    pub fn tx_begin(&self) -> Result<()> {
+        self.store.tx_begin().map_err(io_err)
+    }
+
+    #[napi]
+    pub fn tx_commit(&self) -> Result<()> {
+        self.store.tx_commit().map_err(io_err)
+    }
+
+    #[napi]
+    pub fn tx_rollback(&self) -> Result<()> {
+        self.store.tx_rollback().map_err(io_err)
+    }
+
+    #[napi]
+    pub fn in_transaction(&self) -> bool {
+        self.store.in_transaction()
+    }
+
     // ── AOF ───────────────────────────────────────────────────────────────
 
     #[napi]

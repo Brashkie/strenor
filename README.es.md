@@ -369,6 +369,34 @@ db.dequeue('jobs'); //            -> { id: 1 }  (FIFO)
 db.llen('jobs'); //               -> 1
 ```
 
+## Transacciones
+
+`transaction(fn)` ejecuta un bloque **todo-o-nada**. Se toma un snapshot del
+estado; si `fn` lanza, se revierte todo y no se escribe nada al log; si retorna,
+todas las escrituras se confirman como un único batch atómico.
+
+```ts
+db.transaction(() => {
+  const saldo = db.get('alice');
+  if (saldo < monto) throw new Error('fondos insuficientes'); // revierte todo
+  db.set('alice', saldo - monto);
+  db.set('bob', db.get('bob') + monto);
+});
+```
+
+| Miembro | Descripción |
+|---|---|
+| `transaction<T>(fn)` | Todo-o-nada; revierte si `fn` lanza, confirma si retorna |
+| `batch<T>(fn)` | Junta escrituras en un solo journal, **sin** rollback |
+| `inTransaction` | Si hay una transacción/batch abierta |
+
+`batch(fn)` es como `transaction` pero sin el snapshot de rollback: más rápido
+para escrituras masivas, pero si `fn` lanza, lo que ya corrió queda escrito.
+
+No se pueden anidar transacciones. El snapshot de rollback es O(tamaño del
+estado) — pensado para miles de claves, no millones. Es **sincrónico**: no uses
+`await` dentro de `fn`.
+
 ## Durabilidad
 
 Por defecto Strenor vive en memoria (con `dump`/`load` para snapshots). Si le das

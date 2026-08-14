@@ -68,6 +68,10 @@ struct Inner {
     map: HashMap<String, Entry>,
     aof: Option<Aof>,
     closed: bool,
+    /// When a transaction is open, journalled records accumulate here instead of
+    /// hitting the log, then flush as one atomic batch on commit (or are dropped
+    /// on rollback). `None` means no transaction is in progress.
+    tx_buffer: Option<Vec<Vec<u8>>>,
 }
 
 fn now_ms() -> u64 {
@@ -340,6 +344,10 @@ fn apply_pop(
 /// In-memory store. `parking_lot::Mutex` gives fast, poison-free locking.
 pub struct Store {
     inner: Mutex<Inner>,
+    /// The rollback snapshot for the open transaction, if any. Kept beside
+    /// `inner` (not inside it) so `tx_begin` can produce it while already
+    /// holding the `inner` lock without a borrow conflict.
+    tx_snapshot: Mutex<Option<Vec<u8>>>,
 }
 
 impl Default for Store {
@@ -355,7 +363,9 @@ impl Store {
                 map: HashMap::new(),
                 aof: None,
                 closed: false,
+                tx_buffer: None,
             }),
+            tx_snapshot: Mutex::new(None),
         }
     }
 
@@ -383,7 +393,9 @@ impl Store {
                 map,
                 aof: Some(Aof::open(path, fsync)?),
                 closed: false,
+                tx_buffer: None,
             }),
+            tx_snapshot: Mutex::new(None),
         };
         Ok((
             store,
@@ -496,7 +508,15 @@ impl Store {
 
     /// Journal a record if a log is attached. Errors are surfaced: a write that
     /// isn't durable must not be reported as successful.
+    ///
+    /// Inside a transaction, records are staged in `tx_buffer` and written as one
+    /// atomic batch on commit — never partially — so a rollback leaves the log
+    /// exactly as it was.
     fn journal(inner: &mut Inner, payload: Vec<u8>) -> std::io::Result<()> {
+        if let Some(buf) = inner.tx_buffer.as_mut() {
+            buf.push(payload);
+            return Ok(());
+        }
         match inner.aof.as_mut() {
             Some(a) => a.append(&payload),
             None => Ok(()),
@@ -1115,6 +1135,97 @@ impl Store {
         }
     }
 
+    // ── Transactions & batches ────────────────────────────────────────────
+
+    /// Run `f` as an all-or-nothing transaction.
+    ///
+    /// A snapshot of the state is taken up front; `f` runs against the live store
+    /// with journalling staged in a buffer. If `f` returns `Ok`, the staged
+    /// records are written to the log as one atomic batch and the changes stand.
+    /// If `f` returns `Err` (or a WRONGTYPE/BadScore surfaces as one), the state
+    /// is restored from the snapshot and nothing is written to the log.
+    ///
+    /// Nested transactions aren't supported — calling this while one is open
+    /// returns an error. The rollback snapshot is O(state size); fine for
+    /// thousands of keys, not intended for millions.
+    ///
+    /// Note: the closure takes `&Store`, so it calls the normal methods (`set`,
+    /// `hset`, …). Because the whole thing runs under the store's lock, those
+    /// calls must not deadlock — this is why the JS layer drives commit/rollback
+    /// through the explicit `tx_begin`/`tx_commit`/`tx_rollback` methods instead.
+    pub fn transact<F, T, E>(&self, f: F) -> Result<T, TxError<E>>
+    where
+        F: FnOnce(&Store) -> Result<T, E>,
+    {
+        self.tx_begin().map_err(TxError::Io)?;
+        // A panic in `f` would leave a transaction open; guard against it by
+        // catching unwind and rolling back before re-panicking.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        match result {
+            Ok(Ok(value)) => {
+                self.tx_commit().map_err(TxError::Io)?;
+                Ok(value)
+            }
+            Ok(Err(user_err)) => {
+                self.tx_rollback().map_err(TxError::Io)?;
+                Err(TxError::User(user_err))
+            }
+            Err(panic) => {
+                let _ = self.tx_rollback();
+                std::panic::resume_unwind(panic);
+            }
+        }
+    }
+
+    /// Begin a transaction: snapshot the state and start staging journal records.
+    /// Errors if the store is closed or a transaction is already open.
+    pub fn tx_begin(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.lock();
+        Self::ensure_open(&inner)?;
+        if inner.tx_buffer.is_some() {
+            return Err(std::io::Error::other("a transaction is already open"));
+        }
+        // Snapshot for rollback. Uses the same versioned format as dump/load.
+        let snapshot = Self::dump_locked(&inner);
+        inner.tx_buffer = Some(Vec::new());
+        // Stash the snapshot on the store so commit/rollback can reach it.
+        *self.tx_snapshot.lock() = Some(snapshot);
+        Ok(())
+    }
+
+    /// Commit the open transaction: flush staged records as one atomic batch.
+    pub fn tx_commit(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.lock();
+        let staged = match inner.tx_buffer.take() {
+            Some(s) => s,
+            None => return Err(std::io::Error::other("no transaction is open")),
+        };
+        *self.tx_snapshot.lock() = None; // drop the rollback snapshot
+        if let Some(a) = inner.aof.as_mut() {
+            a.append_batch(&staged)?;
+        }
+        Ok(())
+    }
+
+    /// Roll back the open transaction: restore the pre-transaction state and
+    /// discard all staged records (nothing reaches the log).
+    pub fn tx_rollback(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.lock();
+        if inner.tx_buffer.take().is_none() {
+            return Err(std::io::Error::other("no transaction is open"));
+        }
+        if let Some(snapshot) = self.tx_snapshot.lock().take() {
+            // Restore is infallible here: the snapshot is one we just produced.
+            Self::load_locked(&mut inner, &snapshot);
+        }
+        Ok(())
+    }
+
+    /// Whether a transaction is currently open.
+    pub fn in_transaction(&self) -> bool {
+        self.inner.lock().tx_buffer.is_some()
+    }
+
     // ── AOF maintenance ───────────────────────────────────────────────────
 
     /// Whether this store journals to a log.
@@ -1207,6 +1318,12 @@ impl Store {
     /// The trailing CRC covers everything before it (v3+).
     pub fn dump_bytes(&self) -> Vec<u8> {
         let inner = self.inner.lock();
+        Self::dump_locked(&inner)
+    }
+
+    /// Serialize `inner`'s map. Shared by `dump_bytes` and the transaction
+    /// rollback snapshot, so both use the exact same versioned format.
+    fn dump_locked(inner: &Inner) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(MAGIC);
         buf.push(VERSION);
@@ -1271,6 +1388,13 @@ impl Store {
     /// For v3 the trailing CRC is verified first, so a corrupted file is
     /// rejected instead of silently loading garbage.
     pub fn load_bytes(&self, data: &[u8]) -> Result<(), SnapshotError> {
+        let map = Self::parse_snapshot(data)?;
+        self.inner.lock().map = map;
+        Ok(())
+    }
+
+    /// Parse a snapshot into a fresh map without touching any store state.
+    fn parse_snapshot(data: &[u8]) -> Result<HashMap<String, Entry>, SnapshotError> {
         let bad = |m: &str| SnapshotError(m.to_string());
         if data.len() < 10 {
             return Err(bad("snapshot too small"));
@@ -1404,9 +1528,25 @@ impl Store {
             next.insert(key, Entry { value, expire_at });
         }
 
-        self.inner.lock().map = next;
-        Ok(())
+        Ok(next)
     }
+
+    /// Restore `inner`'s map from a snapshot produced by `dump_locked`. Used by
+    /// transaction rollback, where the snapshot is one we just made, so a parse
+    /// error would be a bug — it's swallowed rather than surfaced.
+    fn load_locked(inner: &mut Inner, data: &[u8]) {
+        if let Ok(map) = Self::parse_snapshot(data) {
+            inner.map = map;
+        }
+    }
+}
+
+/// A transaction fails either because the user's closure returned an error
+/// (`User`) or because journalling the commit/rollback hit IO (`Io`).
+#[derive(Debug)]
+pub enum TxError<E> {
+    User(E),
+    Io(std::io::Error),
 }
 
 /// A list operation can fail on the structure type *or* on journalling.
@@ -2115,6 +2255,101 @@ mod tests {
         let before = s2.aof_size();
         s2.compact().unwrap();
         assert!(s2.aof_size() < before);
+        s2.close().unwrap();
+    }
+
+    #[test]
+    fn tx_commit_applies_all() {
+        let s = Store::new();
+        s.set("balance".into(), b("100"), None).unwrap();
+        s.tx_begin().unwrap();
+        assert!(s.in_transaction());
+        s.set("balance".into(), b("90"), None).unwrap();
+        s.hset("orders", "o1".into(), b("book")).unwrap();
+        s.tx_commit().unwrap();
+        assert!(!s.in_transaction());
+        assert_eq!(s.get("balance"), Ok(Some(b("90"))));
+        assert_eq!(s.hget("orders", "o1").unwrap(), Some(b("book")));
+    }
+
+    #[test]
+    fn tx_rollback_restores_state() {
+        let s = Store::new();
+        s.set("balance".into(), b("100"), None).unwrap();
+        s.hset("h", "keep".into(), b("v")).unwrap();
+
+        s.tx_begin().unwrap();
+        s.set("balance".into(), b("0"), None).unwrap(); // change existing
+        s.set("new".into(), b("x"), None).unwrap(); // add new
+        s.hdel("h", "keep").unwrap(); // remove field
+        s.zadd("lb", 5.0, b("p")).unwrap(); // new structure
+        s.tx_rollback().unwrap();
+
+        // everything reverts to the pre-transaction state
+        assert_eq!(s.get("balance"), Ok(Some(b("100"))));
+        assert_eq!(s.get("new"), Ok(None));
+        assert_eq!(s.hget("h", "keep").unwrap(), Some(b("v")));
+        assert_eq!(s.zcard("lb"), Ok(0));
+        assert!(!s.in_transaction());
+    }
+
+    #[test]
+    fn tx_no_nesting_and_no_stray_commit() {
+        let s = Store::new();
+        s.tx_begin().unwrap();
+        assert!(s.tx_begin().is_err()); // already open
+        s.tx_commit().unwrap();
+        assert!(s.tx_commit().is_err()); // none open
+        assert!(s.tx_rollback().is_err()); // none open
+    }
+
+    #[test]
+    fn tx_transact_helper_commits_and_rolls_back() {
+        let s = Store::new();
+        s.set("k".into(), b("1"), None).unwrap();
+
+        // Ok closure commits.
+        let out: Result<i32, TxError<()>> = s.transact(|st| {
+            st.set("k".into(), b("2"), None).unwrap();
+            Ok(42)
+        });
+        assert_eq!(out.map_err(|_| ()), Ok(42));
+        assert_eq!(s.get("k"), Ok(Some(b("2"))));
+
+        // Err closure rolls back.
+        let out: Result<(), &str> = match s.transact(|st| {
+            st.set("k".into(), b("3"), None).unwrap();
+            Err("boom")
+        }) {
+            Ok(v) => Ok(v),
+            Err(TxError::User(e)) => Err(e),
+            Err(TxError::Io(_)) => Err("io"),
+        };
+        assert_eq!(out, Err("boom"));
+        assert_eq!(s.get("k"), Ok(Some(b("2")))); // unchanged by the failed tx
+    }
+
+    #[test]
+    fn tx_persists_atomically_to_aof() {
+        let tmp = Tmp::new("tx-aof");
+        {
+            let (s, _) = Store::with_aof(tmp.path(), false).unwrap();
+            s.set("a".into(), b("1"), None).unwrap();
+            s.tx_begin().unwrap();
+            s.set("a".into(), b("2"), None).unwrap();
+            s.set("b".into(), b("3"), None).unwrap();
+            s.tx_commit().unwrap();
+            // a rolled-back tx writes nothing
+            s.tx_begin().unwrap();
+            s.set("c".into(), b("never"), None).unwrap();
+            s.tx_rollback().unwrap();
+            s.close().unwrap();
+        }
+        let (s2, rec) = Store::with_aof(tmp.path(), false).unwrap();
+        assert!(!rec.truncated);
+        assert_eq!(s2.get("a"), Ok(Some(b("2"))));
+        assert_eq!(s2.get("b"), Ok(Some(b("3"))));
+        assert_eq!(s2.get("c"), Ok(None)); // rolled back, never journalled
         s2.close().unwrap();
     }
 }

@@ -6,6 +6,18 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-13
+
+### Added
+
+- **Transactions** (`transaction(fn)`): all-or-nothing. State is snapshotted up
+  front; if `fn` throws, every change is rolled back and nothing is written to
+  the log; if it returns, all writes are committed as one atomic batch.
+- **Batches** (`batch(fn)`): journal all writes in one pass without a rollback
+  snapshot — the write-batching speed-up without all-or-nothing semantics.
+- `inTransaction` getter.
+- Internal: the AOF gained an `append_batch` for atomic multi-record writes.
+
 ## [0.3.2] - 2026-08-03
 
 Completes the v0.3.x data structures.
@@ -138,7 +150,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Brashkie/strenor/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Brashkie/strenor/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Brashkie/strenor/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Brashkie/strenor/compare/v0.2.0...v0.3.0

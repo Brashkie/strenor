@@ -416,6 +416,64 @@ export class Strenor {
     return out;
   }
 
+  // ---- transactions & batches ----
+
+  /**
+   * Run `fn` as an all-or-nothing transaction.
+   *
+   * State is snapshotted up front and `fn` runs against the store as usual. If
+   * it returns normally, every write is committed to the log as one atomic
+   * batch. If `fn` throws, the state is rolled back to the snapshot and nothing
+   * is written — the throw then propagates to the caller.
+   *
+   * ```ts
+   * db.transaction(() => {
+   *   db.set('balance', 90);
+   *   db.hset('orders', id, order);
+   *   if (somethingWrong) throw new Error('abort'); // rolls everything back
+   * });
+   * ```
+   *
+   * Transactions can't be nested. The rollback snapshot is O(state size) —
+   * intended for thousands of keys, not millions. Synchronous only: don't
+   * `await` inside `fn`, since the transaction spans the whole call.
+   */
+  transaction<T>(fn: () => T): T {
+    this.db.txBegin();
+    let result: T;
+    try {
+      result = fn();
+    } catch (err) {
+      this.db.txRollback();
+      throw err;
+    }
+    this.db.txCommit();
+    return result;
+  }
+
+  /**
+   * Run `fn` and journal all its writes as a single batch on success.
+   *
+   * Like `transaction`, but without the rollback snapshot: faster for bulk
+   * writes, and if `fn` throws, whatever ran before the throw stays staged and
+   * is still flushed. Use it when you want the write-batching speed-up but don't
+   * need all-or-nothing semantics.
+   */
+  batch<T>(fn: () => T): T {
+    this.db.txBegin();
+    try {
+      return fn();
+    } finally {
+      // Commit whatever was staged, even on throw — no rollback.
+      this.db.txCommit();
+    }
+  }
+
+  /** Whether a transaction/batch is currently open. */
+  get inTransaction(): boolean {
+    return this.db.inTransaction();
+  }
+
   // ---- durability (append-only log) ----
 
   /**

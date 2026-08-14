@@ -51,6 +51,10 @@ export interface NativeStrenorInstance {
   zcard(key: string): number;
   zrange(key: string, start: number, stop: number): Buffer[];
   zrangeWithScores(key: string, start: number, stop: number): Buffer[];
+  txBegin(): void;
+  txCommit(): void;
+  txRollback(): void;
+  inTransaction(): boolean;
   close(): void;
   hasAof(): boolean;
   aofSize(): number;
