@@ -42,3 +42,22 @@ in the TypeScript layer. Keep that boundary intact.
 > `vitest` directly, build first with `npm run build:native` — otherwise you are
 > testing a stale `.node` and will see confusing errors like
 > `TypeError: this.db.<method> is not a function`.
+
+## Benchmarks
+
+Strenor uses [Criterion](https://github.com/bheisler/criterion.rs) for
+reproducible micro-benchmarks of the pure engine (no NAPI/JS overhead):
+
+```bash
+npm run bench          # or: cargo bench -p strenor-store --bench engine
+```
+
+The suite covers KV, list, hash, sorted set, and transaction commit. Criterion
+compares each run against the previous one and reports regressions, so run it
+before and after any change that could affect performance.
+
+> **On publishing numbers.** Benchmark results are only meaningful relative to
+> each other on the same machine. Never quote absolute throughput, or comparisons
+> against other stores, without stating the hardware, OS, and rustc version, and
+> without a reproducible method. Bare "X is N times faster" claims are not
+> acceptable — the whole point of Criterion here is honest, repeatable numbers.

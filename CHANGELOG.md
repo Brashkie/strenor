@@ -6,6 +6,30 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-16
+
+Starts Phase 5 (performance & robustness) and reorganizes the roadmap.
+
+### Added
+
+- **Benchmark infrastructure** using Criterion: reproducible micro-benchmarks for
+  the pure engine, covering KV (`set`/`get`), list, hash, sorted set, and
+  transaction commit. Run with `npm run bench` (or `cargo bench -p strenor-store
+  --bench engine`). Measures the Rust core in isolation, without the NAPI/JS
+  boundary.
+
+### Changed
+
+- **ROADMAP** reorganized by *phase* (capability evolution) instead of mixing
+  phases with version numbers. Each phase notes the releases that delivered it;
+  the CHANGELOG remains the authoritative per-release history.
+
+### Notes
+
+- No production code paths changed in this release — the engine is byte-for-byte
+  the same. This is tooling and documentation, so existing behavior and the
+  snapshot format are untouched.
+
 ## [0.4.0] - 2026-08-13
 
 ### Added
@@ -150,7 +174,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Brashkie/strenor/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Brashkie/strenor/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Brashkie/strenor/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Brashkie/strenor/compare/v0.3.0...v0.3.1
