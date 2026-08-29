@@ -66,6 +66,44 @@ describe('Strenor', () => {
     });
   });
 
+  describe('robustness', () => {
+    it('handles keys and values with arbitrary bytes', () => {
+      const weirdKey = 'clé\u0000\u{1F600}';
+      db.setBuffer(weirdKey, Buffer.from([0, 255, 0, 128]));
+      expect(db.getBuffer(weirdKey)).toEqual(Buffer.from([0, 255, 0, 128]));
+
+      db.setBuffer('empty', Buffer.alloc(0));
+      expect(db.getBuffer('empty')).toEqual(Buffer.alloc(0)); // empty != missing
+      expect(db.exists('empty')).toBe(true);
+
+      db.set('', 'empty key is valid');
+      expect(db.get('')).toBe('empty key is valid');
+    });
+
+    it('round-trips a large value', () => {
+      const big = Buffer.alloc(1024 * 1024, 7); // 1 MB
+      db.setBuffer('big', big);
+      expect(db.getBuffer('big')?.length).toBe(big.length);
+      db.dump(SNAP);
+      const fresh = new Strenor();
+      fresh.load(SNAP);
+      expect(fresh.getBuffer('big')?.equals(big)).toBe(true);
+    });
+
+    it('rejects a corrupt snapshot with a huge length field without crashing', () => {
+      // Hand-craft a v2 header claiming 4 billion entries with no body.
+      const header = Buffer.concat([
+        Buffer.from('STRN'),
+        Buffer.from([2, 0]), // version 2, flags
+        Buffer.from([0xff, 0xff, 0xff, 0xff]), // count = 4 billion
+      ]);
+      writeFileSync(SNAP, header);
+      const fresh = new Strenor();
+      // Must throw a normal error, not exhaust memory or crash the process.
+      expect(() => fresh.load(SNAP)).toThrow();
+    });
+  });
+
   describe('key management', () => {
     it('del / exists / size behave correctly', () => {
       db.set('a', 1);

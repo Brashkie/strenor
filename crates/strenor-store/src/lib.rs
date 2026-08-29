@@ -1439,7 +1439,14 @@ impl Store {
         let at = read(&mut p, 4)?;
         let count = u32_at(body, at) as usize;
 
-        let mut next = HashMap::with_capacity(count);
+        // Never trust a length field from a file: a corrupt `count` (e.g. 4
+        // billion) would make `with_capacity` try to reserve gigabytes and abort
+        // the process before any per-entry validation runs. Every entry needs at
+        // least ~6 bytes on disk, so the real count can't exceed body/6. Reserve
+        // the smaller of the two; if the stored count lied high, the loop still
+        // fails cleanly in `read()` with "truncated".
+        let cap = count.min(body.len() / 6 + 1);
+        let mut next = HashMap::with_capacity(cap);
         for _ in 0..count {
             let at = read(&mut p, 4)?;
             let kl = u32_at(body, at) as usize;
@@ -1469,7 +1476,7 @@ impl Store {
                 TYPE_LIST => {
                     let at = read(&mut p, 4)?;
                     let n = u32_at(body, at) as usize;
-                    let mut l = VecDeque::with_capacity(n);
+                    let mut l = VecDeque::with_capacity(n.min(body.len() / 4 + 1));
                     for _ in 0..n {
                         let at = read(&mut p, 4)?;
                         let el = u32_at(body, at) as usize;
@@ -1481,7 +1488,7 @@ impl Store {
                 TYPE_HASH => {
                     let at = read(&mut p, 4)?;
                     let n = u32_at(body, at) as usize;
-                    let mut h = HashMap::with_capacity(n);
+                    let mut h = HashMap::with_capacity(n.min(body.len() / 4 + 1));
                     for _ in 0..n {
                         let at = read(&mut p, 4)?;
                         let fl = u32_at(body, at) as usize;
@@ -1498,7 +1505,7 @@ impl Store {
                 TYPE_SET => {
                     let at = read(&mut p, 4)?;
                     let n = u32_at(body, at) as usize;
-                    let mut set = HashSet::with_capacity(n);
+                    let mut set = HashSet::with_capacity(n.min(body.len() / 4 + 1));
                     for _ in 0..n {
                         let at = read(&mut p, 4)?;
                         let ml = u32_at(body, at) as usize;
@@ -2351,5 +2358,145 @@ mod tests {
         assert_eq!(s2.get("b"), Ok(Some(b("3"))));
         assert_eq!(s2.get("c"), Ok(None)); // rolled back, never journalled
         s2.close().unwrap();
+    }
+
+    // ── Hardening: adversarial and edge-case inputs ───────────────────────
+
+    #[test]
+    fn snapshot_with_huge_count_does_not_oom() {
+        // A corrupt count field must not trigger a giant allocation. Build a
+        // minimal v2 header claiming 4 billion entries with no body to back it.
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC);
+        data.push(2); // version 2 (no trailing CRC to worry about)
+        data.push(0); // flags
+        data.extend_from_slice(&u32::MAX.to_le_bytes()); // count = 4 billion
+                                                         // no entries follow
+        let s = Store::new();
+        // Must return an error (truncated), not abort the process on allocation.
+        assert!(s.load_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn snapshot_with_huge_value_len_is_rejected() {
+        // v2 entry whose value-length claims to be enormous but has no bytes.
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC);
+        data.push(2);
+        data.push(0);
+        data.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        data.extend_from_slice(&1u32.to_le_bytes()); // key len = 1
+        data.push(b'k'); // key
+        data.extend_from_slice(&0u64.to_le_bytes()); // no expiry
+        data.push(TYPE_BYTES);
+        data.extend_from_slice(&u32::MAX.to_le_bytes()); // value len = 4GB
+                                                         // no value bytes
+        let s = Store::new();
+        assert!(s.load_bytes(&data).is_err()); // truncated, not OOM
+    }
+
+    #[test]
+    fn snapshot_with_huge_list_count_is_rejected() {
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC);
+        data.push(2);
+        data.push(0);
+        data.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        data.extend_from_slice(&1u32.to_le_bytes()); // key len
+        data.push(b'q');
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.push(TYPE_LIST);
+        data.extend_from_slice(&u32::MAX.to_le_bytes()); // element count = 4B
+        let s = Store::new();
+        assert!(s.load_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn keys_and_values_with_arbitrary_bytes() {
+        let s = Store::new();
+        // NUL bytes, high bytes, and an empty value are all valid.
+        let weird_key = "clé\0\u{1F600}".to_string();
+        let weird_val = vec![0u8, 255, 0, 128, 42];
+        s.set(weird_key.clone(), weird_val.clone(), None).unwrap();
+        assert_eq!(s.get(&weird_key), Ok(Some(weird_val)));
+
+        s.set("empty".into(), Vec::new(), None).unwrap();
+        assert_eq!(s.get("empty"), Ok(Some(Vec::new()))); // empty value != missing
+        assert!(s.exists("empty"));
+
+        // Empty key is a valid key.
+        s.set(String::new(), vec![1], None).unwrap();
+        assert_eq!(s.get(""), Ok(Some(vec![1])));
+    }
+
+    #[test]
+    fn arbitrary_bytes_survive_snapshot_roundtrip() {
+        let s = Store::new();
+        let val: Vec<u8> = (0..=255u8).collect(); // every byte value
+        s.set("all-bytes".into(), val.clone(), None).unwrap();
+        s.push_back("list", vec![0, 255, 0]).unwrap();
+        s.hset("h", "\0field".into(), vec![255, 254]).unwrap();
+        s.sadd("set", vec![0, 0, 0]).unwrap();
+
+        let bytes = s.dump_bytes();
+        let fresh = Store::new();
+        fresh.load_bytes(&bytes).unwrap();
+        assert_eq!(fresh.get("all-bytes"), Ok(Some(val)));
+        assert_eq!(fresh.lrange("list", 0, -1), Ok(vec![vec![0, 255, 0]]));
+        assert_eq!(fresh.hget("h", "\0field").unwrap(), Some(vec![255, 254]));
+        assert!(fresh.sismember("set", &[0, 0, 0]).unwrap());
+    }
+
+    #[test]
+    fn large_value_roundtrips() {
+        // A megabyte value should store, fetch, and snapshot without issue.
+        let s = Store::new();
+        let big = vec![7u8; 1024 * 1024];
+        s.set("big".into(), big.clone(), None).unwrap();
+        assert_eq!(s.get("big"), Ok(Some(big.clone())));
+        let snap = s.dump_bytes();
+        let fresh = Store::new();
+        fresh.load_bytes(&snap).unwrap();
+        assert_eq!(fresh.get("big"), Ok(Some(big)));
+    }
+
+    #[test]
+    fn truncated_snapshot_headers_are_rejected_cleanly() {
+        let s = Store::new();
+        // Every prefix of a valid snapshot must error, never panic.
+        s.set("k".into(), b("value"), None).unwrap();
+        let full = s.dump_bytes();
+        for cut in 0..full.len() {
+            let fresh = Store::new();
+            // Must not panic on any truncation point.
+            let _ = fresh.load_bytes(&full[..cut]);
+        }
+        // And the full thing still loads.
+        let fresh = Store::new();
+        assert!(fresh.load_bytes(&full).is_ok());
+    }
+
+    #[test]
+    fn lrange_extreme_indices_never_panic() {
+        let s = Store::new();
+        for c in ["a", "b", "c"] {
+            s.push_back("l", b(c)).unwrap();
+        }
+        // i64 extremes must not overflow the index math.
+        assert_eq!(
+            s.lrange("l", i64::MIN, i64::MAX),
+            Ok(vec![b("a"), b("b"), b("c")])
+        );
+        assert_eq!(s.lrange("l", i64::MAX, i64::MIN), Ok(Vec::new()));
+        assert_eq!(s.lrange("l", -1000, 1000), Ok(vec![b("a"), b("b"), b("c")]));
+    }
+
+    #[test]
+    fn zrange_extreme_indices_never_panic() {
+        let s = Store::new();
+        s.zadd("z", 1.0, b("a")).unwrap();
+        s.zadd("z", 2.0, b("b")).unwrap();
+        assert_eq!(s.zrange("z", i64::MIN, i64::MAX), Ok(vec![b("a"), b("b")]));
+        assert_eq!(s.zrange("z", i64::MAX, i64::MIN), Ok(Vec::new()));
     }
 }

@@ -6,6 +6,24 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-17
+
+Hardening of the core (Phase 5). No API changes.
+
+### Fixed
+
+- **Snapshot loading is now resistant to corrupt length fields.** A snapshot
+  whose entry count or a value/collection length was corrupted to a huge number
+  could make `load` attempt a multi-gigabyte allocation and abort the process
+  before validation. Capacity reservations are now bounded by what the file can
+  actually contain, so a malformed snapshot fails with a normal error instead.
+
+### Added
+
+- Hardening tests: adversarial snapshots (huge counts/lengths, every truncation
+  point), keys and values with arbitrary bytes (NUL, high bytes, empty, empty
+  key), megabyte values, and extreme `i64` range indices for `lrange`/`zrange`.
+
 ## [0.5.0] - 2026-08-16
 
 Starts Phase 5 (performance & robustness) and reorganizes the roadmap.
@@ -174,7 +192,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Brashkie/strenor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Brashkie/strenor/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Brashkie/strenor/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Brashkie/strenor/compare/v0.3.1...v0.3.2
