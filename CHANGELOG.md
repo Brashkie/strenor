@@ -6,6 +6,27 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-29
+
+Performance measurement of the Core KV (Phase 5). No API or behavior changes.
+
+### Added
+
+- Expanded Criterion benchmarks for the Core KV: `set_overwrite`, `del`,
+  `exists`, and `get_hit` across value sizes (16 B → 64 KB) to measure how the
+  value clone scales.
+- `PERFORMANCE.md`: measured numbers and the reasoning behind optimization
+  decisions — including why storing bytes as `Arc<[u8]>` was measured and
+  rejected (the real cost is the `Buffer` copy at the FFI boundary, so the net
+  gain was ~18% for a niche case, not worth reworking the engine).
+
+### Notes
+
+- No production code changed. The benchmarks confirmed the Core KV is already
+  fast (a hit is a map lookup plus a clone) and that the only real bottleneck is
+  transaction commit (O(state) rollback snapshot), which remains the documented
+  candidate for a later, carefully measured optimization.
+
 ## [0.5.1] - 2026-08-17
 
 Hardening of the core (Phase 5). No API changes.
@@ -192,7 +213,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/Brashkie/strenor/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Brashkie/strenor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Brashkie/strenor/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Brashkie/strenor/compare/v0.3.2...v0.4.0

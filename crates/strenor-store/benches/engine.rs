@@ -24,6 +24,17 @@ fn bench_kv(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("set_overwrite", |b| {
+        // Overwriting an existing key: no new allocation in the map slot.
+        let store = Store::new();
+        store.set("k".into(), vec![0; 4], None).unwrap();
+        b.iter(|| {
+            store
+                .set(black_box("k".into()), black_box(vec![1, 2, 3, 4]), None)
+                .unwrap()
+        });
+    });
+
     group.bench_function("get_hit", |b| {
         let store = Store::new();
         store.set("key".into(), vec![1, 2, 3, 4], None).unwrap();
@@ -34,6 +45,34 @@ fn bench_kv(c: &mut Criterion) {
         let store = Store::new();
         b.iter(|| black_box(store.get(black_box("absent")).unwrap()));
     });
+
+    group.bench_function("del", |b| {
+        let store = Store::new();
+        b.iter_batched(
+            || {
+                store.set("k".into(), vec![1, 2, 3, 4], None).unwrap();
+            },
+            |_| store.del(black_box("k")).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("exists", |b| {
+        let store = Store::new();
+        store.set("k".into(), vec![1], None).unwrap();
+        b.iter(|| black_box(store.exists(black_box("k"))));
+    });
+
+    // The interesting one: `get` clones the whole value, so its cost should grow
+    // with value size. These numbers decide whether an Arc/zero-copy return is
+    // worth the complexity — measure before optimizing.
+    for size in [16usize, 256, 4096, 65536] {
+        group.bench_function(format!("get_hit_{size}b"), |b| {
+            let store = Store::new();
+            store.set("k".into(), vec![7u8; size], None).unwrap();
+            b.iter(|| black_box(store.get(black_box("k")).unwrap()));
+        });
+    }
 
     group.finish();
 }

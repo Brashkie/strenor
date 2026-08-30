@@ -394,6 +394,8 @@ writes, but if `fn` throws, whatever already ran stays written.
 Transactions can't be nested. The rollback snapshot is O(state size) — meant for
 thousands of keys, not millions. It's **synchronous**: don't `await` inside `fn`.
 
+See [PERFORMANCE.md](./PERFORMANCE.md) for measured benchmarks and optimization decisions.
+
 ## Durability
 
 By default Strenor is memory-only (with `dump`/`load` for snapshots). Point it at

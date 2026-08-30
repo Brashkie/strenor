@@ -397,6 +397,8 @@ No se pueden anidar transacciones. El snapshot de rollback es O(tamaño del
 estado) — pensado para miles de claves, no millones. Es **sincrónico**: no uses
 `await` dentro de `fn`.
 
+Ver [PERFORMANCE.md](./PERFORMANCE.md) para benchmarks medidos y decisiones de optimización.
+
 ## Durabilidad
 
 Por defecto Strenor vive en memoria (con `dump`/`load` para snapshots). Si le das
