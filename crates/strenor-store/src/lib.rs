@@ -46,6 +46,7 @@ const TYPE_ZSET: u8 = 4;
 /// A structure-typed value. The engine distinguishes these; it never looks
 /// inside a blob. New engine structures (Hash, Set, SortedSet) will be added
 /// here in later versions.
+#[derive(Clone)]
 enum Value {
     Bytes(Vec<u8>),
     List(VecDeque<Vec<u8>>),
@@ -56,6 +57,7 @@ enum Value {
 
 /// A stored record: a typed value plus an optional expiration (TTL applies to
 /// any structure type, exactly like Redis).
+#[derive(Clone)]
 struct Entry {
     value: Value,
     expire_at: Option<u64>,
@@ -344,10 +346,12 @@ fn apply_pop(
 /// In-memory store. `parking_lot::Mutex` gives fast, poison-free locking.
 pub struct Store {
     inner: Mutex<Inner>,
-    /// The rollback snapshot for the open transaction, if any. Kept beside
-    /// `inner` (not inside it) so `tx_begin` can produce it while already
-    /// holding the `inner` lock without a borrow conflict.
-    tx_snapshot: Mutex<Option<Vec<u8>>>,
+    /// Undo-log for the open transaction, if any. Maps each key touched during
+    /// the transaction to its state *before* the transaction began: `Some(entry)`
+    /// if it existed, `None` if it didn't. Only the first change to a key is
+    /// recorded, so rollback restores the pre-transaction value. This is
+    /// O(keys changed), not O(state size) — the whole point of the redesign.
+    tx_undo: Mutex<Option<HashMap<String, Option<Entry>>>>,
 }
 
 impl Default for Store {
@@ -365,7 +369,7 @@ impl Store {
                 closed: false,
                 tx_buffer: None,
             }),
-            tx_snapshot: Mutex::new(None),
+            tx_undo: Mutex::new(None),
         }
     }
 
@@ -395,7 +399,7 @@ impl Store {
                 closed: false,
                 tx_buffer: None,
             }),
-            tx_snapshot: Mutex::new(None),
+            tx_undo: Mutex::new(None),
         };
         Ok((
             store,
@@ -523,6 +527,22 @@ impl Store {
         }
     }
 
+    /// Before a mutation touches `key` inside a transaction, record its
+    /// pre-transaction state in the undo-log — but only the first time the key is
+    /// touched, so rollback restores the value as it was before `tx_begin`.
+    ///
+    /// No transaction open → does nothing. This is what makes rollback
+    /// O(keys changed) instead of O(state size): we clone one entry per changed
+    /// key, lazily, rather than the whole map up front.
+    fn record_undo(&self, inner: &Inner, key: &str) {
+        let mut undo_guard = self.tx_undo.lock();
+        if let Some(undo) = undo_guard.as_mut() {
+            if !undo.contains_key(key) {
+                undo.insert(key.to_string(), inner.map.get(key).cloned());
+            }
+        }
+    }
+
     /// Reject mutations on a closed store. Silently accepting them would drop
     /// writes that were never journalled — data loss with no error.
     fn ensure_open(inner: &Inner) -> std::io::Result<()> {
@@ -566,6 +586,7 @@ impl Store {
         let expire_at = Self::expire_at_from_ttl(ttl_ms);
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        self.record_undo(&inner, &key);
         let rec = aof::rec_set(&key, &value, expire_at);
         apply_set(&mut inner.map, key, value, expire_at);
         Self::journal(&mut inner, rec)
@@ -593,6 +614,7 @@ impl Store {
     pub fn del(&self, key: &str) -> std::io::Result<bool> {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        self.record_undo(&inner, key);
         let existed = apply_del(&mut inner.map, key);
         if existed {
             Self::journal(&mut inner, aof::rec_key_only(aof::OP_DEL, key))?;
@@ -617,6 +639,7 @@ impl Store {
         let expire_at = now_ms() + ttl_ms.max(0) as u64;
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        self.record_undo(&inner, key);
         let ok = apply_expire(&mut inner.map, key, expire_at);
         if ok {
             Self::journal(&mut inner, aof::rec_expire(key, expire_at))?;
@@ -627,6 +650,7 @@ impl Store {
     pub fn persist(&self, key: &str) -> std::io::Result<bool> {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        self.record_undo(&inner, key);
         let ok = apply_persist(&mut inner.map, key);
         if ok {
             Self::journal(&mut inner, aof::rec_key_only(aof::OP_PERSIST, key))?;
@@ -668,6 +692,17 @@ impl Store {
     pub fn clear(&self) -> std::io::Result<()> {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        // Inside a transaction, `clear` touches every key, so the undo-log must
+        // capture them all to be able to roll back. This one operation is
+        // unavoidably O(state) — but only clear, and only within a transaction.
+        {
+            let mut undo_guard = self.tx_undo.lock();
+            if let Some(undo) = undo_guard.as_mut() {
+                for (k, e) in inner.map.iter() {
+                    undo.entry(k.clone()).or_insert_with(|| Some(e.clone()));
+                }
+            }
+        }
         inner.map.clear();
         Self::journal(&mut inner, aof::rec_clear())
     }
@@ -686,6 +721,7 @@ impl Store {
         let now = now_ms();
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        self.record_undo(&inner, key);
         if inner
             .map
             .get(key)
@@ -722,6 +758,7 @@ impl Store {
         let now = now_ms();
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
+        self.record_undo(&inner, key);
         if inner
             .map
             .get(key)
@@ -836,6 +873,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let rec = aof::rec_hset(key, &field, &value);
         let is_new = apply_hset(&mut inner.map, key, field, value)?;
         Self::journal(&mut inner, rec)?;
@@ -862,6 +900,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let existed = apply_hdel(&mut inner.map, key, field)?;
         if existed {
             Self::journal(&mut inner, aof::rec_hdel(key, field))?;
@@ -934,6 +973,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let rec = aof::rec_smember(aof::OP_SADD, key, &member);
         let added = apply_sadd(&mut inner.map, key, member)?;
         Self::journal(&mut inner, rec)?;
@@ -946,6 +986,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let removed = apply_srem(&mut inner.map, key, member)?;
         if removed {
             Self::journal(&mut inner, aof::rec_smember(aof::OP_SREM, key, member))?;
@@ -1005,6 +1046,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let rec = aof::rec_zadd(key, score, &member);
         let is_new = apply_zadd(&mut inner.map, key, score, member)?;
         Self::journal(&mut inner, rec)?;
@@ -1018,6 +1060,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let new_score = match inner.map.get_mut(key) {
             Some(e) => match &mut e.value {
                 Value::ZSet(z) => z
@@ -1053,6 +1096,7 @@ impl Store {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         self.hash_expired(&mut inner, key, now);
+        self.record_undo(&inner, key);
         let removed = apply_zrem(&mut inner.map, key, member)?;
         if removed {
             Self::journal(&mut inner, aof::rec_zrem(key, member))?;
@@ -1177,46 +1221,59 @@ impl Store {
         }
     }
 
-    /// Begin a transaction: snapshot the state and start staging journal records.
+    /// Begin a transaction: start an empty undo-log and stage journal records.
     /// Errors if the store is closed or a transaction is already open.
+    ///
+    /// Unlike the previous full-snapshot approach, begin is now O(1) — it just
+    /// arms the undo-log. Per-key previous state is captured lazily, only for
+    /// keys the transaction actually touches.
     pub fn tx_begin(&self) -> std::io::Result<()> {
         let mut inner = self.inner.lock();
         Self::ensure_open(&inner)?;
         if inner.tx_buffer.is_some() {
             return Err(std::io::Error::other("a transaction is already open"));
         }
-        // Snapshot for rollback. Uses the same versioned format as dump/load.
-        let snapshot = Self::dump_locked(&inner);
         inner.tx_buffer = Some(Vec::new());
-        // Stash the snapshot on the store so commit/rollback can reach it.
-        *self.tx_snapshot.lock() = Some(snapshot);
+        *self.tx_undo.lock() = Some(HashMap::new());
         Ok(())
     }
 
-    /// Commit the open transaction: flush staged records as one atomic batch.
+    /// Commit the open transaction: flush staged records as one atomic batch and
+    /// discard the undo-log. O(records written), independent of state size.
     pub fn tx_commit(&self) -> std::io::Result<()> {
         let mut inner = self.inner.lock();
         let staged = match inner.tx_buffer.take() {
             Some(s) => s,
             None => return Err(std::io::Error::other("no transaction is open")),
         };
-        *self.tx_snapshot.lock() = None; // drop the rollback snapshot
+        *self.tx_undo.lock() = None; // drop the undo-log: changes are permanent
         if let Some(a) = inner.aof.as_mut() {
             a.append_batch(&staged)?;
         }
         Ok(())
     }
 
-    /// Roll back the open transaction: restore the pre-transaction state and
-    /// discard all staged records (nothing reaches the log).
+    /// Roll back the open transaction: undo each recorded change and discard all
+    /// staged records (nothing reaches the log). O(keys changed), not O(state).
     pub fn tx_rollback(&self) -> std::io::Result<()> {
         let mut inner = self.inner.lock();
         if inner.tx_buffer.take().is_none() {
             return Err(std::io::Error::other("no transaction is open"));
         }
-        if let Some(snapshot) = self.tx_snapshot.lock().take() {
-            // Restore is infallible here: the snapshot is one we just produced.
-            Self::load_locked(&mut inner, &snapshot);
+        if let Some(undo) = self.tx_undo.lock().take() {
+            // Restore each touched key to its pre-transaction state. `Some(entry)`
+            // means it existed and is put back; `None` means it didn't exist and
+            // is removed. Applied in any order — each key is independent.
+            for (key, prev) in undo {
+                match prev {
+                    Some(entry) => {
+                        inner.map.insert(key, entry);
+                    }
+                    None => {
+                        inner.map.remove(&key);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1536,15 +1593,6 @@ impl Store {
         }
 
         Ok(next)
-    }
-
-    /// Restore `inner`'s map from a snapshot produced by `dump_locked`. Used by
-    /// transaction rollback, where the snapshot is one we just made, so a parse
-    /// error would be a bug — it's swallowed rather than surfaced.
-    fn load_locked(inner: &mut Inner, data: &[u8]) {
-        if let Ok(map) = Self::parse_snapshot(data) {
-            inner.map = map;
-        }
     }
 }
 
@@ -2498,5 +2546,78 @@ mod tests {
         s.zadd("z", 2.0, b("b")).unwrap();
         assert_eq!(s.zrange("z", i64::MIN, i64::MAX), Ok(vec![b("a"), b("b")]));
         assert_eq!(s.zrange("z", i64::MAX, i64::MIN), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn tx_undo_same_key_touched_many_times() {
+        // The undo-log must record only the ORIGINAL value, no matter how many
+        // times a key changes within the transaction.
+        let s = Store::new();
+        s.set("k".into(), b("original"), None).unwrap();
+        s.tx_begin().unwrap();
+        s.set("k".into(), b("v1"), None).unwrap();
+        s.set("k".into(), b("v2"), None).unwrap();
+        s.set("k".into(), b("v3"), None).unwrap();
+        s.tx_rollback().unwrap();
+        assert_eq!(s.get("k"), Ok(Some(b("original")))); // back to original, not v2
+    }
+
+    #[test]
+    fn tx_rollback_of_clear_restores_everything() {
+        let s = Store::new();
+        s.set("a".into(), b("1"), None).unwrap();
+        s.set("b".into(), b("2"), None).unwrap();
+        s.hset("h", "f".into(), b("v")).unwrap();
+        s.tx_begin().unwrap();
+        s.clear().unwrap();
+        assert_eq!(s.size(), 0); // cleared inside the tx
+        s.tx_rollback().unwrap();
+        // everything comes back
+        assert_eq!(s.get("a"), Ok(Some(b("1"))));
+        assert_eq!(s.get("b"), Ok(Some(b("2"))));
+        assert_eq!(s.hget("h", "f").unwrap(), Some(b("v")));
+    }
+
+    #[test]
+    fn tx_rollback_across_all_structures() {
+        let s = Store::new();
+        s.set("kv".into(), b("keep"), None).unwrap();
+        s.push_back("list", b("keep")).unwrap();
+        s.hset("hash", "keep".into(), b("v")).unwrap();
+        s.sadd("set", b("keep")).unwrap();
+        s.zadd("zset", 1.0, b("keep")).unwrap();
+
+        s.tx_begin().unwrap();
+        s.set("kv".into(), b("changed"), None).unwrap();
+        s.push_back("list", b("added")).unwrap();
+        s.hset("hash", "new".into(), b("x")).unwrap();
+        s.sadd("set", b("added")).unwrap();
+        s.zadd("zset", 2.0, b("added")).unwrap();
+        s.set("brand-new".into(), b("x"), None).unwrap();
+        s.tx_rollback().unwrap();
+
+        // every structure is back exactly as before the transaction
+        assert_eq!(s.get("kv"), Ok(Some(b("keep"))));
+        assert_eq!(s.lrange("list", 0, -1), Ok(vec![b("keep")]));
+        assert_eq!(s.hlen("hash"), Ok(1));
+        assert_eq!(s.hget("hash", "keep").unwrap(), Some(b("v")));
+        assert_eq!(s.scard("set"), Ok(1));
+        assert_eq!(s.zcard("zset"), Ok(1));
+        assert_eq!(s.get("brand-new"), Ok(None)); // never existed before
+    }
+
+    #[test]
+    fn tx_commit_then_rollback_noop_is_safe() {
+        // A key created and committed, then a later tx that rolls back, must keep
+        // the committed value.
+        let s = Store::new();
+        s.tx_begin().unwrap();
+        s.set("k".into(), b("committed"), None).unwrap();
+        s.tx_commit().unwrap();
+
+        s.tx_begin().unwrap();
+        s.set("k".into(), b("temp"), None).unwrap();
+        s.tx_rollback().unwrap();
+        assert_eq!(s.get("k"), Ok(Some(b("committed"))));
     }
 }

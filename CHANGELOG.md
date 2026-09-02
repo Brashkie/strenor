@@ -6,6 +6,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-01
+
+Transaction performance (Phase 5). No API changes — same behavior, much faster.
+
+### Changed
+
+- **Transaction rollback is now O(keys changed) instead of O(state size).**
+  `begin` previously took a full snapshot of the entire store for rollback, so a
+  small transaction over a large store was slow. It now keeps a per-key undo-log
+  that records only the previous value of each key the transaction touches.
+  Measured rollback of 10 writes over a 10,000-key store dropped from ~3.9 ms to
+  ~7 µs. `begin` is now O(1). (`clear` inside a transaction is the one operation
+  that still captures O(state), because it touches every key by definition.)
+
+### Notes
+
+- Public API and observable behavior are unchanged; all existing transaction
+  tests pass untouched. See PERFORMANCE.md for before/after numbers.
+
 ## [0.5.2] - 2026-08-29
 
 Performance measurement of the Core KV (Phase 5). No API or behavior changes.
@@ -213,7 +232,8 @@ the `0.1.x` line.
 - Pluggable codec interface (`registerCodec`, per-write `codec` option); JSON
   is the default object codec.
 
-[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/Brashkie/strenor/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/Brashkie/strenor/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/Brashkie/strenor/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Brashkie/strenor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Brashkie/strenor/compare/v0.4.0...v0.5.0

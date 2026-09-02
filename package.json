@@ -1,6 +1,6 @@
 {
   "name": "strenor",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Embedded high-performance key-value store for Node.js, powered by Rust. In-process, no server, no config.",
   "type": "module",
   "main": "dist/index.cjs",
@@ -105,15 +105,15 @@
     }
   },
   "optionalDependencies": {
-    "@strenor/binary-win32-x64-msvc": "0.5.2",
-    "@strenor/binary-darwin-x64": "0.5.2",
-    "@strenor/binary-linux-x64-gnu": "0.5.2",
-    "@strenor/binary-linux-x64-musl": "0.5.2",
-    "@strenor/binary-linux-arm64-gnu": "0.5.2",
-    "@strenor/binary-linux-arm64-musl": "0.5.2",
-    "@strenor/binary-darwin-arm64": "0.5.2",
-    "@strenor/binary-win32-arm64-msvc": "0.5.2",
-    "@strenor/binary-android-arm64": "0.5.2",
-    "@strenor/binary-android-arm-eabi": "0.5.2"
+    "@strenor/binary-win32-x64-msvc": "0.5.3",
+    "@strenor/binary-darwin-x64": "0.5.3",
+    "@strenor/binary-linux-x64-gnu": "0.5.3",
+    "@strenor/binary-linux-x64-musl": "0.5.3",
+    "@strenor/binary-linux-arm64-gnu": "0.5.3",
+    "@strenor/binary-linux-arm64-musl": "0.5.3",
+    "@strenor/binary-darwin-arm64": "0.5.3",
+    "@strenor/binary-win32-arm64-msvc": "0.5.3",
+    "@strenor/binary-android-arm64": "0.5.3",
+    "@strenor/binary-android-arm-eabi": "0.5.3"
   }
 }

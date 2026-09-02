@@ -43,7 +43,7 @@ pub struct Scored {
     pub score: f64,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ZSet {
     scores: HashMap<Vec<u8>, f64>,
     sorted: BTreeSet<(OrderedF64, Vec<u8>)>,

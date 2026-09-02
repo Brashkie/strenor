@@ -163,27 +163,59 @@ fn bench_zset(c: &mut Criterion) {
 fn bench_transaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("transaction");
 
-    // Commit cost includes the rollback snapshot taken at begin — this is the
-    // O(state size) behaviour we documented, so we measure it at a real size.
-    group.bench_function("commit_10_writes_over_1k_state", |b| {
-        b.iter_batched(
-            || {
-                let store = Store::new();
-                for i in 0..1000u64 {
-                    store.set(format!("k{i}"), vec![0u8; 8], None).unwrap();
-                }
-                store
-            },
-            |store| {
-                store.tx_begin().unwrap();
-                for i in 0..10u64 {
-                    store.set(format!("tx{i}"), vec![1u8; 8], None).unwrap();
-                }
-                store.tx_commit().unwrap();
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    // Commit/rollback 10 writes over states of growing size. With the undo-log,
+    // these are O(keys changed), so the times should stay roughly FLAT as the
+    // state grows — not scale with it (which is what the old full-snapshot did).
+    //
+    // We use `iter_batched_ref` so the store is created once per batch and the
+    // O(state) teardown is NOT charged to the measured operation. Committed txs
+    // add keys, but the 10-writes cost is what we're isolating.
+    for state in [100usize, 1000, 10_000] {
+        group.bench_function(format!("commit_10_writes_over_{state}_state"), |b| {
+            b.iter_batched_ref(
+                || {
+                    let store = Store::new();
+                    for i in 0..state as u64 {
+                        store.set(format!("k{i}"), vec![0u8; 8], None).unwrap();
+                    }
+                    (store, 0u64)
+                },
+                |(store, round)| {
+                    *round += 1;
+                    store.tx_begin().unwrap();
+                    for i in 0..10u64 {
+                        store
+                            .set(format!("tx{round}_{i}"), vec![1u8; 8], None)
+                            .unwrap();
+                    }
+                    store.tx_commit().unwrap();
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    for state in [100usize, 1000, 10_000] {
+        group.bench_function(format!("rollback_10_writes_over_{state}_state"), |b| {
+            b.iter_batched_ref(
+                || {
+                    let store = Store::new();
+                    for i in 0..state as u64 {
+                        store.set(format!("k{i}"), vec![0u8; 8], None).unwrap();
+                    }
+                    store
+                },
+                |store| {
+                    store.tx_begin().unwrap();
+                    for i in 0..10u64 {
+                        store.set(format!("tx{i}"), vec![1u8; 8], None).unwrap();
+                    }
+                    store.tx_rollback().unwrap();
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
 
     group.finish();
 }
